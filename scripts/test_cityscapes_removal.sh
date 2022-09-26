@@ -1,0 +1,1 @@
+python test.py --name erode_sea_eord_divco --dataset_mode cityscapesbox --gpu 1 --netG sesame --no_instance --no_skip_connections --batchSize 1 --mix_input_gen --nThreads 1 --bbox --segmentation_mask --removal 

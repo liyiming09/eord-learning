@@ -1,0 +1,46 @@
+erode_unet_base	addtion:	0.3169
+		removal:	0.5117
+
+erode_sesa_base	addtion:	0.4017
+		removal:	0.5892
+
+
+erode_sesa_eord	addtion:	0.406  (纯粹数据增强，无其他约束)
+		removal:	0.588
+
+
+
+python train.py  --name erode_unet_eord_divco --netG unet --dataset_mode cityscapesbox --gpu 0,1,2,3,4,5,6,7 --no_instance --no_skip_connections --batchSize 8 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --eord --netD divcomultiscale --divco
+
+erode_sesa_eord_divco	addtion:0.3978
+			removal:0.5962
+
+
+CUDA_VISIBLE_DEVICES="0,1" python -m torch.distributed.launch --nproc_per_node 2 train.py  --name ddp_sea_eord_divco --netG sesame --dataset_mode cityscapesbox --gpu 0,1 --no_instance --no_skip_connections --batchSize 2 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --eord --netD divcomultiscale --divco  --serial_batches
+
+
+to do: 在D更新过程中，加入 mask sequence的相似度 与 featvector相似度， 两个相四度序列要一致的约束
+
+加入了ddp厚的baseline
+ddp_sea_eord_divco： 	addtion:0.4031
+			removal:0.6152
+
+修正了divco中的bug，使得feat encoder可更新：
+CUDA_VISIBLE_DEVICES="4,5" python -m torch.distributed.launch --nproc_per_node 2 train.py  --name ddp_sea_eord_divco_fix --netG sesame --dataset_mode cityscapesbox --gpu 0,1  --no_instance --no_skip_connections --batchSize 2 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --eord --netD divcomultiscale --divco  --serial_batches
+ddp_sea_eord_divco：
+
+# 将原本列表输出的feat改为最后一个feat，以此进行modeseek的更新
+CUDA_VISIBLE_DEVICES="4,5,6,7" python -m torch.distributed.launch --nproc_per_node 4 --master_port 9999 train.py  --name ddp_sea_eord_divco_fix --netG sesame --dataset_mode cityscapesbox --gpu 0,1,2,3  --no_instance --no_skip_connections --batchSize 4 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --eord --netD divcomultiscale --divco  --serial_batches
+ddp_sea_eord_divco_fix： 	addtion:0.4038
+				removal:0.6053
+
+# 使用小网络，进行快速实验
+CUDA_VISIBLE_DEVICES="4,5,6,7" python -m torch.distributed.launch --nproc_per_node 4 --master_port 9999 train.py  --name ddp_unet_eord_divco_fix --netG unet --dataset_mode cityscapesbox --gpu 0,1,2,3  --no_instance --no_skip_connections --batchSize 4 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --eord --netD divcomultiscale --divco  --serial_batches
+ddp_unet_eord_divco_fix： 	addtion:0.3639
+				removal:0.5548
+
+调整学习率结果：
+ddp_unet_eord_divco_fix_lr0.0002： 	addtion:0.354
+				removal:0.523
+ddp_unet_eord_divco_smallepoch
+sleep 20h;CUDA_VISIBLE_DEVICES="4,5" python -m torch.distributed.launch --nproc_per_node 2  test.py --name ddp_unet_eord_divco_smallepoch_lr0.0002 --dataset_mode cityscapesbox --gpu 0,1 --netG unet --no_instance --no_skip_connections --batchSize 2 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --removal; CUDA_VISIBLE_DEVICES="4,5" python -m torch.distributed.launch --nproc_per_node 2  test.py --name ddp_unet_eord_divco_smallepoch_lr0.0002 --dataset_mode cityscapesbox --gpu 0,1 --netG unet --no_instance --no_skip_connections --batchSize 2 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --addition;CUDA_VISIBLE_DEVICES="4,5" python -m torch.distributed.launch --nproc_per_node 2  test.py --name ddp_unet_eord_divco_smallepoch_lr0.0002 --dataset_mode cityscapesbox --gpu 0,1 --netG unet --no_instance --no_skip_connections --batchSize 2 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --removal; CUDA_VISIBLE_DEVICES="4,5" python -m torch.distributed.launch --nproc_per_node 2  test.py --name ddp_unet_eord_divco_smallepoch_lr0.0002 --dataset_mode cityscapesbox --gpu 0,1 --netG unet --no_instance --no_skip_connections --batchSize 2 --mix_input_gen --nThreads 0 --bbox --segmentation_mask --addition;
