@@ -57,6 +57,7 @@ class BaseOptions():
 
         # for generator
         parser.add_argument('--netG', type=str, default='sesame', help='selects model to use for netG')
+        parser.add_argument('--netE', type=str, default='attentionunet', help='selects model to use for netE')
         parser.add_argument('--ngf', type=int, default=64, help='# of gen filters in first conv layer')
         parser.add_argument('--init_type', type=str, default='xavier', help='network initialization [normal|xavier|kaiming|orthogonal]')
         parser.add_argument('--init_variance', type=float, default=0.02, help='variance of the initialization distribution')

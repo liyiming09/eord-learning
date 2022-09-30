@@ -3,6 +3,7 @@ Copyright (C) 2019 NVIDIA Corporation.  All rights reserved.
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
 
+from sqlite3 import InterfaceError
 import torch
 import torch.nn as nn
 import numpy as np
@@ -362,6 +363,131 @@ class DivcoNLayerDiscriminator(BaseNetwork):
                 return results[1:]
             else:
                 return results[-1]
+
+    def my_dot(self, x, y):
+        return x + x * y.sum(1).unsqueeze(1)
+
+
+
+class LearnEorDDiscriminator(BaseNetwork):
+    @staticmethod
+    def modify_commandline_options(parser, is_train):
+        parser.add_argument('--n_layers_D', type=int, default=4,
+                            help='# layers in each discriminator')
+        return parser
+
+    def __init__(self, opt, input_nc=None):
+        super().__init__()
+        self.opt = opt
+        self.base = self.opt.batchSize//len(self.opt.gpu_ids) #每一个基础单元内有几个实例
+        feat_dim = 128
+        kw = 4
+        padw = int(np.ceil((kw - 1.0) / 2))
+        nf = opt.ndf
+        if input_nc is None:
+            input_nc = self.compute_D_input_nc(opt)
+
+        branch = []
+        sizes = (input_nc - 3, 3) 
+        original_nf = nf
+        for input_nc in sizes: 
+            nf = original_nf
+            norm_layer = get_nonspade_norm_layer(opt, opt.norm_D)
+            sequence = [[nn.Conv2d(input_nc, nf, kernel_size=kw, stride=2, padding=padw),
+                         nn.LeakyReLU(0.2, False)]]
+
+            for n in range(1, opt.n_layers_D):
+                nf_prev = nf
+                nf = min(nf * 2, 512)
+                stride = 1 if n == opt.n_layers_D - 1 else 2
+                sequence += [[norm_layer(nn.Conv2d(nf_prev, nf, kernel_size=kw,
+                                                   stride=stride, padding=padw)),
+                              nn.LeakyReLU(0.2, False)
+                              ]]
+
+            branch.append(sequence)
+            
+        sem_sequence = nn.ModuleList()
+        for n in range(len(branch[0])):
+            sem_sequence.append(nn.Sequential(*branch[0][n]))
+        self.sem_sequence = nn.Sequential(*sem_sequence)
+
+        sequence = branch[1]
+        sequence += [[norm_layer(nn.Conv2d(nf, feat_dim, kernel_size=kw,
+                                                   stride=stride, padding=padw)),
+                              nn.LeakyReLU(0.2, False)
+                              ]]
+                              
+
+
+        # We divide the layers into groups to extract intermediate layer outputs
+        self.img_sequence = nn.ModuleList()
+        for n in range(len(sequence)):
+            self.img_sequence.append(nn.Sequential(*sequence[n]))
+        self.interv_conv = nn.Sequential(norm_layer(nn.Conv2d(feat_dim, feat_dim, kernel_size=kw,
+                                                   stride=stride, padding=padw)),
+                              nn.LeakyReLU(0.2, False)
+
+        )
+        self.interv_pool = nn.AdaptiveAvgPool2d(1)
+        self.interv_head = nn.Conv2d(feat_dim,1, kernel_size=kw, stride=1, padding=padw)
+        self.cls_conv =  nn.Sequential(norm_layer(nn.Conv2d(feat_dim, feat_dim, kernel_size=kw,
+                                                   stride=stride, padding=padw)),
+                              nn.LeakyReLU(0.2, False),
+                              nn.AdaptiveAvgPool2d(1)
+        )
+        self.cls_head = nn.Linear(feat_dim, opt.label_nc)
+
+        # self.conv_feat = nn.Conv2d(512+256+128+64, feat_dim, 1, 1, 0)
+        # self.feat_bn = nn.BatchNorm2d(feat_dim)
+        # self.predictor = MLP(feat_dim,feat_dim)
+    def compute_D_input_nc(self, opt):
+        label_nc = opt.label_nc
+        input_nc = label_nc + opt.output_nc
+        if opt.contain_dontcare_label:
+            input_nc += 1
+        if not opt.no_instance:
+            input_nc += 1
+        if not opt.no_inpaint:
+            input_nc += 1
+            
+        return input_nc
+
+    def forward(self, input, enc_feat = False):
+        # print('input:',input.shape)
+        img, sem = input[:,-3:], input[:,:-3]
+        sem_results = self.sem_sequence(sem)
+        results = [img]
+
+        for submodel in self.img_sequence[:-1]:
+            intermediate_output = submodel(results[-1])
+            
+            results.append(intermediate_output)
+            # if enc_feat:
+            #     b = torch.nn.functional.adaptive_avg_pool2d(intermediate_output,(1,1))
+            #     feat.append(b)
+        # if enc_feat:
+        #     mix_feat = torch.cat(feat,1)
+        #     out_feat = self.conv_feat(mix_feat)
+        #     out_feat = self.feat_bn(out_feat)
+        #     src = out_feat[0:1*self.base,...].clone().view(self.base,-1)# shape:1x128
+        #     # print(src.shape)
+        #     src = self.predictor(src)
+        #     pos = out_feat[1*self.base:2*self.base,...].clone().view(self.base,-1)
+        #     out = torch.cat((src,pos),0)
+            # out_feat = torch.nn.functional.normalize(out_feat, dim=1)
+        intermediate_output = self.my_dot(intermediate_output, sem_results)
+        results.append(self.img_sequence[-1](intermediate_output))
+        mix_feature = results[-1]
+        interv_feature = self.interv_conv(mix_feature)
+        interv_vector = self.interv_pool(interv_feature)
+        interv_res = self.interv_head(interv_feature)
+
+        cls_vector = self.cls_conv(mix_feature)
+        cls_res = self.cls_head(cls_vector)
+
+
+        return [cls_res, interv_res, cls_vector, interv_vector]
 
     def my_dot(self, x, y):
         return x + x * y.sum(1).unsqueeze(1)
