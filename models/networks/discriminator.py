@@ -376,7 +376,7 @@ class LearnEorDDiscriminator(BaseNetwork):
                             help='# layers in each discriminator')
         return parser
 
-    def __init__(self, opt, input_nc=None):
+    def __init__(self, opt, label_nc=None):
         super().__init__()
         self.opt = opt
         self.base = self.opt.batchSize//len(self.opt.gpu_ids) #每一个基础单元内有几个实例
@@ -384,11 +384,12 @@ class LearnEorDDiscriminator(BaseNetwork):
         kw = 4
         padw = int(np.ceil((kw - 1.0) / 2))
         nf = opt.ndf
-        if input_nc is None:
-            input_nc = self.compute_D_input_nc(opt)
+        if label_nc is None:
+            label_nc = 1
+            # input_nc = self.compute_D_input_nc(opt)
 
         branch = []
-        sizes = (input_nc - 3, 3) 
+        sizes = (label_nc, 3) 
         original_nf = nf
         for input_nc in sizes: 
             nf = original_nf
@@ -453,7 +454,7 @@ class LearnEorDDiscriminator(BaseNetwork):
             
         return input_nc
 
-    def forward(self, input, enc_feat = False):
+    def forward(self, input, enc_feat = False, is_generate = False):
         # print('input:',input.shape)
         img, sem = input[:,-3:], input[:,:-3]
         sem_results = self.sem_sequence(sem)
@@ -480,14 +481,16 @@ class LearnEorDDiscriminator(BaseNetwork):
         results.append(self.img_sequence[-1](intermediate_output))
         mix_feature = results[-1]
         interv_feature = self.interv_conv(mix_feature)
-        interv_vector = self.interv_pool(interv_feature)
+        interv_vector = self.interv_pool(interv_feature).view(interv_feature.size(0),-1)
         interv_res = self.interv_head(interv_feature)
 
-        cls_vector = self.cls_conv(mix_feature)
+        cls_vector = self.cls_conv(mix_feature).view(mix_feature.size(0),-1)
         cls_res = self.cls_head(cls_vector)
 
-
-        return [cls_res, interv_res, cls_vector, interv_vector]
+        if is_generate:
+            return [interv_res]
+        else:
+            return [cls_res, interv_res, cls_vector, interv_vector]
 
     def my_dot(self, x, y):
         return x + x * y.sum(1).unsqueeze(1)

@@ -73,8 +73,12 @@ class GANLoss(nn.Module):
                     minval = torch.min(-input - 1, self.get_zero_tensor(input))
                     loss = -torch.mean(minval)
             else:
-                assert target_is_real, "The generator's hinge loss must be aiming for real"
-                loss = -torch.mean(input)
+                # assert target_is_real, "The generator's hinge loss must be aiming for real"
+                if target_is_real:
+                    loss = -torch.mean(input)
+                else:
+                    target_tensor = self.get_target_tensor(input, target_is_real)
+                    return F.mse_loss(input, target_tensor)
             return loss
         else:
             # wgan
@@ -199,9 +203,27 @@ class ByolLoss(nn.Module):
         # print(src.shape,pos.shape)
         loss_contra = self.loss_cos(src,pos)
 
-
-
         return loss_contra
+
+class CosLoss(nn.Module):
+    def __init__(self):
+        super(CosLoss, self).__init__()
+
+        self.criterion = torch.nn.L1Loss()
+        # self.opt = opt
+        # self.base = self.opt.batchSize//len(self.opt.gpu_ids) #每一个基础单元内有几个实例
+    
+    def loss_cos(self, x, y):
+        x = F.normalize(x, dim=-1, p=2)
+        y = F.normalize(y, dim=-1, p=2)
+        cos = F.cosine_similarity(x,y,dim=-1)
+        return cos
+
+    def __call__(self, x,y):
+        cos_loss = self.loss_cos(x,y)
+
+        return cos_loss
+
 
 class ModeSeekingLoss(nn.Module):
 
@@ -521,7 +543,7 @@ class EffectLoss(nn.Module):
         #     else:
         #         return input.mean()
         target_tensor = self.get_target_tensor(input, semantics, target_is_real)
-        return F.mse_loss(input, target_tensor)
+        return F.mse_loss(input, target_tensor, reduction='sum')/10000
 
     def __call__(self, input_neg,input_fake,  semantics, target_is_real, for_discriminator=True):
         # computing loss is a bit complicated because |input| may not be
@@ -533,7 +555,7 @@ class EffectLoss(nn.Module):
                     pred_neg = pred_neg[0]
                     pred_fake = pred_fake[0]
                     # if dist.get_rank() == 0: print(pred_neg==pred_fake)
-                    pred_i = -pred_neg + pred_fake[0:1,...]
+                    pred_i = -pred_neg + pred_fake
                 loss_tensor = self.loss(pred_i, semantics, target_is_real, for_discriminator)
                 # if dist.get_rank() == 0: print(loss_tensor.shape, loss_tensor)
                 bs = 1 if len(loss_tensor.size()) == 0 else loss_tensor.size(0)

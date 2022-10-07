@@ -209,6 +209,14 @@ def save_network(net, label, epoch, opt):
     if len(opt.gpu_ids) and torch.cuda.is_available():
         net.cuda()
 
+def load_pretrained_net(net, label, epoch, opt):
+    save_filename = '%s_net_%s.pth' % (epoch, label)
+    save_dir = '../attention-divco-projector/checkpoints/effect-spade-unet-10/'
+    save_path = os.path.join(save_dir, save_filename)
+    weights = torch.load(save_path)
+    net.load_state_dict(weights)
+    return net
+
 def load_network(net, label, epoch, opt):
     save_filename = '%s_net_%s.pth' % (epoch, label)
     save_dir = os.path.join(opt.checkpoints_dir, opt.name)

@@ -331,7 +331,7 @@ class SegmentationDataset(BaseDataset):
                 zeromap_inst = torch.zeros_like(outputs['label'], dtype=torch.long)
                 outputs['ped_inst'], outputs['ped_label'] = [outputs['inst']], [outputs['label']]
                 # print(outputs['inst'].dtype,outputs['label'].dtype,zeromap.dtype  )
-                outputs['ned_inst'], outputs['ned_label'] = [zeromap_inst for k in range(self.opt.num_negative)], [zeromap for k in range(self.opt.num_negative)]
+                outputs['ned_inst'], outputs['ned_label'] = [zeromap_inst ], [zeromap]
                 # print(len(outputs['ned_inst']),len(outputs['ped_inst']),000)
                 
 
@@ -339,7 +339,6 @@ class SegmentationDataset(BaseDataset):
         if self.config['preprocess_option'] == 'select_region':
             outputs = self.preprocess_cropping(raw_inputs, outputs, params)
         outputs['bbox'] = params['bbox_in_context'] #x,y,xmax,ymax,  x--w, y--h
-        outputs['cls'] = params['bbox_cls']
         return outputs
 
     def __len__(self):

@@ -6,7 +6,7 @@ Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses
 from models.networks.sync_batchnorm import DataParallelWithCallback
 from models.pix2pix_model import Pix2PixModel
 from models.attentioneffect_model import AttentionEffectModel
-from models.learneord_model import LearningEordModel
+from models.learneord_model import LearnEordModel
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
@@ -34,7 +34,7 @@ class EorDTrainer():
         device = torch.device("cuda", local_rank)
 
         # self.pix2pix_model = Pix2PixModel(opt)
-        self.pix2pix_model = LearningEordModel(opt)
+        self.pix2pix_model = LearnEordModel(opt)
 
         if len(opt.gpu_ids) > 0:
             # self.pix2pix_model = DataParallelWithCallback(self.pix2pix_model,
@@ -66,10 +66,15 @@ class EorDTrainer():
 
     def run_generator_one_step(self, data):
         self.optimizer_E.zero_grad()
-        g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='generator')
+        self.optimizer_ED.zero_grad()
+        self.optimizer_D.zero_grad()
+        with torch.autograd.set_detect_anomaly(True):
+            g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='generator')
         # print(123456)
-        g_loss = sum(g_losses.values()).mean()
-        g_loss.backward()
+            g_loss = sum(g_losses.values()).mean()
+        
+
+            g_loss.backward()
         self.optimizer_E.step()
         self.optimizer_E.zero_grad()
         self.g_losses = g_losses
@@ -84,6 +89,7 @@ class EorDTrainer():
     #     d_loss.backward()
 
     def run_discriminator_one_step(self, data):
+        self.optimizer_E.zero_grad()
         self.optimizer_ED.zero_grad()
         self.optimizer_D.zero_grad()
         d_losses = self.pix2pix_model(data, mode='discriminator')

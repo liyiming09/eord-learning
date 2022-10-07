@@ -72,9 +72,9 @@ def define_F(opt, input_nc=None):
 
 
 def define_E(opt, input_nc=None):
-    netF_cls = find_network_using_name(opt.netE ,'interventor')
-    return create_netF(netF_cls, opt)
+    netE_cls = find_network_using_name(opt.netE ,'interventor')
+    return create_network(netE_cls, opt)
 
 def define_ED(opt, input_nc=None):
-    netD_cls = find_network_using_name('LearnEorD', 'discriminator')
-    return create_network(netD_cls, opt, input_nc)
+    netED_cls = find_network_using_name('LearnEorD', 'discriminator')
+    return create_network(netED_cls, opt, input_nc)

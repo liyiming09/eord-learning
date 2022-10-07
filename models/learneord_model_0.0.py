@@ -15,7 +15,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
 import numpy as np
 
-class LearnEordModel(torch.nn.Module):
+class LearningEordModel(torch.nn.Module):
 
     @staticmethod
     def modify_commandline_options(parser, is_train):
@@ -46,7 +46,6 @@ class LearnEordModel(torch.nn.Module):
                 opt.gan_mode, tensor=self.FloatTensor, opt=self.opt)
             self.criterionFeat = torch.nn.L1Loss()
             self.criterioncls = torch.nn.CrossEntropyLoss()
-            self.criterionsimlar = networks.CosLoss()
             if not opt.no_vgg_loss:
                 self.criterionVGG = networks.VGGLoss(self.opt.gpu_ids)
             if opt.use_style_loss:
@@ -85,7 +84,7 @@ class LearnEordModel(torch.nn.Module):
     def forward(self, data, mode):
         input_semantics, real_image, masked_image = self.preprocess_input(data)
 
-        if  self.opt.eord:
+        if  self.opt.divco or self.opt.effect:
             
             self.invent_semantics = []
             self.base_size = self.opt.batchSize//len(self.opt.gpu_ids)
@@ -93,14 +92,14 @@ class LearnEordModel(torch.nn.Module):
                 tmp_semantics = []
                 for k in range(input_semantics[it].shape[0]):
                     tmp_semantics.append(input_semantics[it][k:k+1,[self.cls[k%self.base_size,:]]])
-                self.invent_semantics.append(torch.cat(tmp_semantics,dim = 0))
+                self.invent_semantics.append(torch.cat(tmp_semantics),dim = 0)
 
         if mode == 'generator':
             # self.set_requires_grad(self.netD, False)
             # print(1)
             g_loss, generated = self.compute_generator_loss(
                 input_semantics, real_image, masked_image)
-            return g_loss, generated, masked_image, input_semantics[0]
+            return g_loss, generated, masked_image, input_semantics
         elif mode == 'discriminator':
             # self.set_requires_grad(self.netD, True)
             d_loss = self.compute_discriminator_loss(
@@ -109,7 +108,7 @@ class LearnEordModel(torch.nn.Module):
         elif mode == 'inference':
             with torch.no_grad():
                 fake_image = self.generate_fake(input_semantics, real_image, masked_image)
-            return fake_image, masked_image, input_semantics[0]
+            return fake_image, masked_image, input_semantics
         else:
             raise ValueError("|mode| is invalid")
 
@@ -169,8 +168,6 @@ class LearnEordModel(torch.nn.Module):
                 netD = torch.nn.SyncBatchNorm.convert_sync_batchnorm(netD).to(device)
                 netD = DDP(netD,find_unused_parameters=True,  device_ids=[local_rank], output_device=local_rank).cuda()
 
-        netG = util.load_pretrained_net(netG, 'G', opt.which_epoch, opt)
-        netD = util.load_pretrained_net(netD, 'D', opt.which_epoch, opt)
         if not opt.isTrain or opt.continue_train:
             netG = util.load_network(netG, 'G', opt.which_epoch, opt)
             if opt.isTrain:
@@ -180,7 +177,7 @@ class LearnEordModel(torch.nn.Module):
     
     def initialize_networksE(self, opt):
         netE = networks.define_E(opt)
-        netED = networks.define_ED(opt) if opt.isTrain else None
+        netED = networks.define_D(opt) if opt.isTrain else None
 
         local_rank = self.opt.local_rank
         device = torch.device("cuda", local_rank)
@@ -191,7 +188,7 @@ class LearnEordModel(torch.nn.Module):
             netE = DDP(netE,find_unused_parameters=False,  device_ids=[local_rank], output_device=local_rank).cuda()
             if opt.isTrain:
                 netED = torch.nn.SyncBatchNorm.convert_sync_batchnorm(netED).to(device)
-                netED = DDP(netED,find_unused_parameters=False,  device_ids=[local_rank], output_device=local_rank).cuda()
+                netED = DDP(netED,find_unused_parameters=True,  device_ids=[local_rank], output_device=local_rank).cuda()
 
         if not opt.isTrain or opt.continue_train:
             netE = util.load_network(netE, 'E', opt.which_epoch, opt)
@@ -296,10 +293,6 @@ class LearnEordModel(torch.nn.Module):
 
             input_semantics = torch.cat([input_semantics,1-mask[:,0:1]],dim=1)#input_semantics+遮挡区域
             if self.opt.eord  and (not self.eord_flag):
-                if self.opt.segmentation_mask:
-                
-                    pos_input_semantics *= (1-mask)
-                    neg_input_semantics *= (1-mask)
                 pos_input_semantics = torch.cat([pos_input_semantics,1-mask[:,0:1]],dim=1)#
                 neg_input_semantics = torch.cat([neg_input_semantics,1-mask[:,0:1]],dim=1)#
                 semantics = [input_semantics, pos_input_semantics, neg_input_semantics]
@@ -310,6 +303,7 @@ class LearnEordModel(torch.nn.Module):
 
     def compute_generator_loss(self, input_semantics, real_image, masked_image):
         G_losses = {}
+
         fake_image = self.generate_fake(
             input_semantics[0], real_image, masked_image)
         pos_image, neg_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
@@ -321,20 +315,20 @@ class LearnEordModel(torch.nn.Module):
         #     pred_fake, pred_real, pred_neg = self.discriminate(
         #         input_semantics, fake_image, real_image)
         # else:
-        pred_fake, pred_real, pred_mask_base, pred_mask_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base', is_generate = True)
-        pred_fake_pos, pred_mask_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, mode = 'pos', is_generate = True)
-        pred_fake_neg, pred_mask_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg', is_generate = True)
+        pred_fake, pred_real, pred_mask_base, pred_mask_real = self.discriminate(input_semantics[0], fake_image, real_image, intervent = False)
+        pred_fake_pos, pred_mask_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, intervent = True)
+        pred_fake_neg, pred_mask_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, intervent = True)
         #pred_mask包括两部分，cls的分类结果，和是否进行了干预，true代表无干预，false代表有
 
-        G_losses['GAN'] = self.criterionGAN(pred_fake, True,for_discriminator=False) \
-            + self.criterionGAN(pred_fake_pos, True,for_discriminator=False) 
+        G_losses['GAN'] = self.criterionGAN(pred_fake, True,for_discriminator=False)
+        G_losses['GAN'] += self.criterionGAN(pred_fake_pos, True,for_discriminator=False)
+        G_losses['GAN'] += self.criterionGAN(pred_fake_neg, False,for_discriminator=False)
         
-        G_losses['Mask'] = self.criterionGAN(pred_mask_real, True,for_discriminator=False) \
-            + self.criterionGAN(pred_mask_base, True,for_discriminator=False) \
-                + self.criterionGAN(pred_mask_pos, True,for_discriminator=False) \
-                    + self.criterionGAN(pred_mask_neg, False,for_discriminator=False)
-            #         self.criterioncls(pred_mask_base[0], self.cls.squeeze(1)) \
-            # + self.criterioncls(pred_mask_pos[0], self.cls.squeeze(1)) +  self.criterioncls(pred_mask_neg[0], self.cls.squeeze(1))
+        G_losses['Mask'] = self.criterionGAN(pred_mask_real[1], True,for_discriminator=False) \
+            + self.criterionGAN(pred_mask_base[1], True,for_discriminator=False) \
+                + self.criterionGAN(pred_mask_pos[1], True,for_discriminator=False) \
+                    + self.criterionGAN(pred_mask_neg[1], False,for_discriminator=False) 
+
         if not self.opt.no_ganFeat_loss:
             num_D = len(pred_fake)
             GAN_Feat_loss = self.FloatTensor(1).fill_(0)
@@ -390,16 +384,16 @@ class LearnEordModel(torch.nn.Module):
 
         # pred_fake, pred_real = self.discriminate(
         #     input_semantics, fake_image, real_image)
-        # if self.opt.modeseek and (not self.eord_flag):
-        #     pred_fake, pred_real, pred_neg, feat = self.discriminate(
-        #         input_semantics, fake_image, real_image, enc_feat = True)
-        # elif self.opt.effect:
-        #     pred_fake, pred_real, pred_neg = self.discriminate(
-        #         input_semantics, fake_image, real_image)
-        # else:
-        pred_fake, pred_real, pred_mask_base, pred_mask_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base')
-        pred_fake_pos, pred_mask_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, mode = 'pos')
-        pred_fake_neg, pred_mask_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg')
+        if self.opt.modeseek and (not self.eord_flag):
+            pred_fake, pred_real, pred_neg, feat = self.discriminate(
+                input_semantics, fake_image, real_image, enc_feat = True)
+        elif self.opt.effect:
+            pred_fake, pred_real, pred_neg = self.discriminate(
+                input_semantics, fake_image, real_image)
+        else:
+            pred_fake, pred_real, pred_mask_base, pred_mask_real = self.discriminate(input_semantics[0], fake_image, real_image, intervent = False)
+            pred_fake_pos, pred_mask_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, intervent = True)
+            pred_fake_neg, pred_mask_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, intervent = True)
 
         # mask = input_semantics[:,[-1]]
         # print(self.cls,self.cls.shape)
@@ -414,19 +408,14 @@ class LearnEordModel(torch.nn.Module):
             + self.criterionGAN(pred_mask_base[1], True,for_discriminator=True) \
                 + self.criterionGAN(pred_mask_pos[1], False,for_discriminator=True) \
                     + self.criterionGAN(pred_mask_neg[1], False,for_discriminator=True) 
-        D_losses['D_CLS'] = self.criterioncls(pred_mask_base[0], self.cls.squeeze(1)) \
-            + self.criterioncls(pred_mask_pos[0], self.cls.squeeze(1))\
-                + self.criterioncls(pred_mask_real[0], self.cls.squeeze(1))
-        # xx = self.criterioncls(pred_mask_neg[0], self.cls.squeeze(1))
-             #input B，C  target:B,1
-        D_losses['D_Similar'] = self.criterionsimlar(pred_mask_real[2], pred_mask_real[3]) + self.criterionsimlar(pred_mask_base[2], pred_mask_pos[3]) + self.criterionsimlar(pred_mask_pos[2], pred_mask_base[3])
-        D_losses['D_Fake'] = self.criterionGAN(pred_fake, False,for_discriminator=True)\
-            + self.criterionGAN(pred_fake_pos, False,for_discriminator=True) \
-                + self.criterionGAN(pred_fake_neg, False,for_discriminator=True)
+        D_losses['D_CLS'] = self.criterioncls(pred_mask_base[0], self.cls)
+        D_losses['D_Fake'] = self.criterionGAN(pred_fake, False,for_discriminator=True)
+        D_losses['D_Fake'] += self.criterionGAN(pred_fake_pos, False,for_discriminator=True)
+        D_losses['D_Fake'] += self.criterionGAN(pred_fake_neg, False,for_discriminator=True)
 
         D_losses['D_real'] = self.criterionGAN(pred_real, True,for_discriminator=True)
-        # if self.opt.modeseek and (not self.eord_flag):
-        #     D_losses['D_ms'] = self.criterionModeseek(feat,self.invent_semantics)* self.opt.lambda_ms#
+        if self.opt.modeseek and (not self.eord_flag):
+            D_losses['D_ms'] = self.criterionModeseek(feat,self.invent_semantics)* self.opt.lambda_ms#
         return D_losses
 
     def generate_fake(self, input_semantics, real_image, masked_image = None, mode = 'base'):
@@ -440,13 +429,13 @@ class LearnEordModel(torch.nn.Module):
                 return fake_image
             elif mode == 'intervention':
                 intervent_fakemask = self.netE(input_semantics, mode = mode)
-                self.intervent_pos_mask = intervent_fakemask[:,0:1,...].clone()
+                self.intervent_pos_mask = intervent_fakemask[:,0:1,...]
                 self.whole_pos_mask = input_semantics.clone()
                 for k in range(input_semantics.shape[0]):
                     self.whole_pos_mask[k:k+1,[self.cls[k%self.base_size,:]]] = self.intervent_pos_mask[k:k+1,...].clone()
                 fake_pos_image = self.netG(masked_image, self.whole_pos_mask)
 
-                self.intervent_neg_mask = intervent_fakemask[:,1:2,...].clone()
+                self.intervent_neg_mask = intervent_fakemask[:,1:2,...]
                 self.whole_neg_mask = input_semantics.clone()
                 for k in range(input_semantics.shape[0]):
                     self.whole_neg_mask[k:k+1,[self.cls[k%self.base_size,:]]] = self.intervent_neg_mask[k:k+1,...].clone()
@@ -467,7 +456,7 @@ class LearnEordModel(torch.nn.Module):
     # Given fake and real image, return the prediction of discriminator
     # for each fake and real image.
 
-    def discriminate(self, input_semantics, fake_image, real_image, enc_feat = False, mode = 'base', is_generate = False):
+    def discriminate(self, input_semantics, fake_image, real_image, enc_feat = False, intervent = False):
         # if self.opt.netG == 'unet':
         #     input_semantics = input_semanno_tics[:,:,self.mask_x[0]:self.mask_x[1],\
         #                                           self.mask_y[0]:self.mask_y[1]]
@@ -478,7 +467,7 @@ class LearnEordModel(torch.nn.Module):
 
 
 
-        if mode == 'base':
+        if not intervent:
             fake_concat = torch.cat([input_semantics, fake_image], dim=1)
             real_concat = torch.cat([input_semantics, real_image], dim=1)
 
@@ -492,25 +481,19 @@ class LearnEordModel(torch.nn.Module):
 
             discriminator_out = self.netD(fake_and_real)
             pred_fake, pred_real = self.divide_pred(discriminator_out)
-            pred_mask_fake = self.netED(torch.cat([self.invent_semantics[0], fake_image], dim=1), is_generate)
-            pred_mask_real = self.netED(torch.cat([self.invent_semantics[0], real_image], dim=1), is_generate)
+            pred_mask_fake = self.netED(torch.cat([self.invent_semantics[0], fake_image], dim=1))
+            pred_mask_real = self.netED(torch.cat([self.invent_semantics[0], real_image], dim=1))
             return pred_fake, pred_real, pred_mask_fake, pred_mask_real
 
         else:#干预时，输入的mask只为1,H，W
-            if mode == 'pos':
-                fake_concat = torch.cat([self.whole_pos_mask, fake_image], dim=1)
-                ED_cooncat = torch.cat([self.intervent_pos_mask, fake_image], dim=1)
-            else:
-                fake_concat = torch.cat([self.whole_neg_mask, fake_image], dim=1)
-                ED_cooncat = torch.cat([self.intervent_neg_mask, fake_image], dim=1)
-
+            fake_concat = torch.cat([input_semantics, fake_image], dim=1)
             if not enc_feat:
                 pred_fake = self.netD(fake_concat)
-                pred_mask = self.netED(ED_cooncat, is_generate)
+                pred_mask = self.netED(fake_concat)
                 return pred_fake, pred_mask
             else:
                 pred_fake,feat = self.netD(fake_concat, enc_feat)
-                pred_mask = self.netED(ED_cooncat, is_generate)
+                pred_mask = self.netED(fake_concat)
                 return pred_fake, pred_mask, feat
 
     # Take the prediction of fake and real images from the combined batch

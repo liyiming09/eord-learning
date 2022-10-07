@@ -25,10 +25,10 @@ class conv_block(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True))
+            nn.ReLU(inplace=False))
 
     def forward(self, x):
 
@@ -46,7 +46,7 @@ class up_conv(nn.Module):
             nn.Upsample(scale_factor=2),
             nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=False)
         )
 
     def forward(self, x):
@@ -78,7 +78,7 @@ class Attention_block(nn.Module):
             nn.Sigmoid()
         )
 
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
 
     # def forward(self, g, x, fakeatt = False):
     #     g1 = self.W_g(g)
@@ -119,13 +119,13 @@ class Attention_block(nn.Module):
 
 
 
-class attentionunetGenerator(BaseNetwork):
+class attentionunetInterventor(BaseNetwork):
     """
     Attention Unet implementation
     Paper: https://arxiv.org/abs/1804.03999
     """
     def __init__(self,opt):
-        """Construct a Unet generator
+        """Construct a Unet Interventor
         Parameters:
             input_nc (int)  -- the number of channels in input images
             output_nc (int) -- the number of channels in output images
@@ -137,7 +137,7 @@ class attentionunetGenerator(BaseNetwork):
         We construct the U-Net from the innermost layer to the outermost layer.
         It is a recursive process.
         """
-        super(attentionunetGenerator, self).__init__()
+        super(attentionunetInterventor, self).__init__()
 
         self.opt = opt
         label_nc = opt.label_nc
@@ -242,7 +242,7 @@ class attentionunetGenerator(BaseNetwork):
         return out
 
 
-class spadeunetGenerator(BaseNetwork):
+class spadeunetInterventor(BaseNetwork):
     """
     Attention Unet implementation
     Paper: https://arxiv.org/abs/1804.03999
@@ -253,7 +253,7 @@ class spadeunetGenerator(BaseNetwork):
         return parser
 
     def __init__(self,opt):
-        """Construct a Unet generator
+        """Construct a Unet Interventor
         Parameters:
             input_nc (int)  -- the number of channels in input images
             output_nc (int) -- the number of channels in output images
@@ -265,7 +265,7 @@ class spadeunetGenerator(BaseNetwork):
         We construct the U-Net from the innermost layer to the outermost layer.
         It is a recursive process.
         """
-        super(spadeunetGenerator, self).__init__()
+        super(spadeunetInterventor, self).__init__()
 
         self.opt = opt
         label_nc = opt.label_nc
@@ -393,7 +393,7 @@ class spadeunetGenerator(BaseNetwork):
 
             return out
 
-class spadeunet2Generator(BaseNetwork):
+class spadeunet2Interventor(BaseNetwork):
     """
     Attention Unet implementation
     Paper: https://arxiv.org/abs/1804.03999
@@ -404,7 +404,7 @@ class spadeunet2Generator(BaseNetwork):
         return parser
 
     def __init__(self,opt):
-        """Construct a Unet generator
+        """Construct a Unet Interventor
         Parameters:
             input_nc (int)  -- the number of channels in input images
             output_nc (int) -- the number of channels in output images
@@ -416,7 +416,7 @@ class spadeunet2Generator(BaseNetwork):
         We construct the U-Net from the innermost layer to the outermost layer.
         It is a recursive process.
         """
-        super(spadeunet2Generator, self).__init__()
+        super(spadeunet2Interventor, self).__init__()
 
         self.opt = opt
         label_nc = opt.label_nc
@@ -508,12 +508,12 @@ class spadeunet2Generator(BaseNetwork):
 
             return out
 
-class SesameGenerator(BaseNetwork):
+class SesameInterventor(BaseNetwork):
     @staticmethod
     def modify_commandline_options(parser, is_train):
         parser.add_argument('--resnet_n_downsample', type=int, default=2, help='number of downsampling layers in netG')
-        parser.add_argument('--resnet_n_blocks', type=int, default=4, help='number of residual blocks in the global generator network')
-        parser.add_argument('--spade_n_blocks', type=int, default=5, help='number of residual blocks in the global generator network')
+        parser.add_argument('--resnet_n_blocks', type=int, default=4, help='number of residual blocks in the global Interventor network')
+        parser.add_argument('--spade_n_blocks', type=int, default=5, help='number of residual blocks in the global Interventor network')
         parser.add_argument('--resnet_kernel_size', type=int, default=3,
                             help='kernel size of the resnet block')
         parser.add_argument('--resnet_initial_kernel_size', type=int, default=7,
@@ -651,11 +651,11 @@ class SesameGenerator(BaseNetwork):
 
         return x
 
-class unetGenerator(BaseNetwork):
-    """Create a Unet-based generator"""
+class unetInterventor(BaseNetwork):
+    """Create a Unet-based Interventor"""
 
     def __init__(self, opt):
-        """Construct a Unet generator
+        """Construct a Unet Interventor
         Parameters:
             input_nc (int)  -- the number of channels in input images
             output_nc (int) -- the number of channels in output images
@@ -667,7 +667,7 @@ class unetGenerator(BaseNetwork):
         We construct the U-Net from the innermost layer to the outermost layer.
         It is a recursive process.
         """
-        super(unetGenerator, self).__init__()
+        super(unetInterventor, self).__init__()
         self.opt = opt
         label_nc = opt.label_nc
 
