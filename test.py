@@ -12,7 +12,7 @@ from collections import OrderedDict
 import data
 from options.test_options import TestOptions
 from models.pix2pix_model import Pix2PixModel
-
+from models.learneord_model import LearnEordModel
 from util.visualizer import Visualizer
 from util import html
 
@@ -29,7 +29,7 @@ def main():
 
      # create trainer for our model
     # trainer = Pix2PixTrainer(opt)
-    model = Pix2PixModel(opt)
+    model = LearnEordModel(opt)
     # load the dataloader
     dataloader = data.create_dataloader(opt, dataset)
 
@@ -52,13 +52,13 @@ def main():
         if i * opt.batchSize >= opt.how_many:
             break
 
-        generated, masked_image, semantics = model(data_i, mode='inference')
+        generated, masked_image, semantics_seq = model(data_i, mode='inference')
 
         if masked_image.shape[1] != 3:
             masked_image = masked_image[:,:3]
         
-
-
+        semantics = semantics_seq[0]
+        # pos, neg = semantics_seq[6], semantics_seq[7]           #note1!!!!!!!!!!!!1
         img_path = data_i['path']
         if opt.bbox:
             img_path = data_i['image_path']
@@ -78,6 +78,7 @@ def main():
                                 ('mask', data_i['mask_in'][b]),
                                 ('synthesized_image', generated[b]),
                                 ('real_label', data_i['label'][b]),
+                                # ('intervention_pos', pos[b]), ('intervention_neg', neg[b]),                   #note2!!!!!!!!!!!!
                                 ('real_image', data_i['image'][b]),
                                 ('masked_image', masked_image[b])])
 

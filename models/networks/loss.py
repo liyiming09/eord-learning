@@ -563,7 +563,7 @@ class EffectLoss(nn.Module):
                 loss += new_loss
             return loss / len(input_neg)
         else:
-            pred = -input_neg[0][0] + input_fake[0][0][0:1,...]
+            pred = -input_neg + input_fake
             return self.loss(pred, semantics, target_is_real, for_discriminator)
 
 

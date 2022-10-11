@@ -57,7 +57,7 @@ class EorDTrainer():
         self.generated = None
 
         if opt.isTrain:
-            self.optimizer_E, self.optimizer_D, self.optimizer_ED = \
+            self.optimizer_G, self.optimizer_E, self.optimizer_D, self.optimizer_ED = \
                 self.pix2pix_model_on_one_gpu.create_optimizers(opt)
             self.old_lr = opt.lr
 
@@ -66,6 +66,7 @@ class EorDTrainer():
 
     def run_generator_one_step(self, data):
         self.optimizer_E.zero_grad()
+        self.optimizer_G.zero_grad()
         self.optimizer_ED.zero_grad()
         self.optimizer_D.zero_grad()
         with torch.autograd.set_detect_anomaly(True):
@@ -77,6 +78,8 @@ class EorDTrainer():
             g_loss.backward()
         self.optimizer_E.step()
         self.optimizer_E.zero_grad()
+        self.optimizer_G.step()
+        self.optimizer_G.zero_grad()
         self.g_losses = g_losses
         self.generated = generated
         self.masked = masked
@@ -112,7 +115,12 @@ class EorDTrainer():
         return self.pix2pix_model_on_one_gpu.real_shape
 
     def get_semantics(self):
-        return self.semantics
+        return self.semantics[0]
+
+    def get_intervention(self):
+        base, pos, neg = self.semantics[1], self.semantics[6], self.semantics[7]
+        return [base, pos, neg]
+
 
     def get_mask(self):
         if self.masked.shape[1] == 3:
@@ -150,5 +158,9 @@ class EorDTrainer():
                 param_group['lr'] = new_lr_D
             for param_group in self.optimizer_E.param_groups:
                 param_group['lr'] = new_lr_G
+            for param_group in self.optimizer_ED.param_groups:
+                param_group['lr'] = new_lr_D
+            for param_group in self.optimizer_G.param_groups:
+                param_group['lr'] = new_lr_G/10
             print('update learning rate: %f -> %f' % (self.old_lr, new_lr))
             self.old_lr = new_lr

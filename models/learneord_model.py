@@ -47,14 +47,13 @@ class LearnEordModel(torch.nn.Module):
             self.criterionFeat = torch.nn.L1Loss()
             self.criterioncls = torch.nn.CrossEntropyLoss()
             self.criterionsimlar = networks.CosLoss()
+            self.criterionRecons = torch.nn.MSELoss()
             if not opt.no_vgg_loss:
                 self.criterionVGG = networks.VGGLoss(self.opt.gpu_ids)
             if opt.use_style_loss:
                 self.criterionStyle = networks.StyleLoss(self.opt.gpu_ids)
             if self.opt.divco:
                 self.criterionBYol = networks.ByolLoss(self.opt)
-            if opt.recons_loss:
-                self.criterionRecons = torch.nn.L1Loss()
             if self.opt.modeseek:
                 self.criterionModeseek = networks.ModeSeekingLoss(self.opt)
             if self.opt.monce:
@@ -100,7 +99,7 @@ class LearnEordModel(torch.nn.Module):
             # print(1)
             g_loss, generated = self.compute_generator_loss(
                 input_semantics, real_image, masked_image)
-            return g_loss, generated, masked_image, input_semantics[0]
+            return g_loss, generated, masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
         elif mode == 'discriminator':
             # self.set_requires_grad(self.netD, True)
             d_loss = self.compute_discriminator_loss(
@@ -108,14 +107,23 @@ class LearnEordModel(torch.nn.Module):
             return d_loss
         elif mode == 'inference':
             with torch.no_grad():
-                fake_image = self.generate_fake(input_semantics, real_image, masked_image)
-            return fake_image, masked_image, input_semantics[0]
+                mode = 'base'
+                if mode == 'base':
+                    fake_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'base')
+                    return fake_image, masked_image, input_semantics + self.invent_semantics
+                else:
+                    pos_image, neg_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
+                # fake_image, _ = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
+
+                # fake_image = self.generate_fake(input_semantics, real_image, masked_image)
+
+                    return pos_image, masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
         else:
             raise ValueError("|mode| is invalid")
 
     def create_optimizers(self, opt):
         E_params = list(self.netE.parameters())
-
+        G_params = list(self.netG.parameters())
         if opt.isTrain:
             D_params = list(self.netD.parameters())
             ED_params = list(self.netED.parameters())
@@ -127,11 +135,12 @@ class LearnEordModel(torch.nn.Module):
             beta1, beta2 = 0, 0.9
             G_lr, D_lr, ED_lr = opt.lr / 2, opt.lr * 2, opt.lr * 2
 
+        optimizer_G = torch.optim.Adam(G_params, lr=G_lr/10, betas=(beta1, beta2))
         optimizer_E = torch.optim.Adam(E_params, lr=G_lr, betas=(beta1, beta2))
         optimizer_D = torch.optim.Adam(D_params, lr=D_lr, betas=(beta1, beta2))
         optimizer_ED = torch.optim.Adam(ED_params, lr=ED_lr, betas=(beta1, beta2))
 
-        return optimizer_E, optimizer_D, optimizer_ED
+        return optimizer_G, optimizer_E, optimizer_D, optimizer_ED
 
     def save(self, epoch):
         util.save_network(self.netG, 'G', epoch, self.opt)
@@ -170,7 +179,7 @@ class LearnEordModel(torch.nn.Module):
                 netD = DDP(netD,find_unused_parameters=True,  device_ids=[local_rank], output_device=local_rank).cuda()
 
         netG = util.load_pretrained_net(netG, 'G', opt.which_epoch, opt)
-        netD = util.load_pretrained_net(netD, 'D', opt.which_epoch, opt)
+        if opt.isTrain: netD = util.load_pretrained_net(netD, 'D', opt.which_epoch, opt)
         if not opt.isTrain or opt.continue_train:
             netG = util.load_network(netG, 'G', opt.which_epoch, opt)
             if opt.isTrain:
@@ -328,7 +337,7 @@ class LearnEordModel(torch.nn.Module):
 
         G_losses['GAN'] = self.criterionGAN(pred_fake, True,for_discriminator=False) \
             + self.criterionGAN(pred_fake_pos, True,for_discriminator=False) 
-        
+        G_losses['Mask_recons'] = (self.criterionRecons(self.intervent_pos_mask, self.invent_semantics[1]) + self.criterionRecons(self.intervent_neg_mask, self.invent_semantics[2]) ) * self.opt.lambda_recons
         G_losses['Mask'] = self.criterionGAN(pred_mask_real, True,for_discriminator=False) \
             + self.criterionGAN(pred_mask_base, True,for_discriminator=False) \
                 + self.criterionGAN(pred_mask_pos, True,for_discriminator=False) \

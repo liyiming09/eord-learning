@@ -173,7 +173,7 @@ class attentionunetInterventor(BaseNetwork):
 
         self.Conv = nn.Conv2d(filters[0], output_nc, kernel_size=1, stride=1, padding=0)
 
-        #self.active = torch.nn.Sigmoid()
+        self.active = torch.nn.Sigmoid()
 
 
     def forward(self, x, extra = None, getatt = False, mode = 'base'):
@@ -208,7 +208,7 @@ class attentionunetInterventor(BaseNetwork):
 
             out = self.Conv(d2)
 
-        #  out = self.active(out)
+            out = self.active(out)
 
 
             return out, atts
@@ -237,7 +237,7 @@ class attentionunetInterventor(BaseNetwork):
 
             out = self.Conv(d2)
 
-      #  out = self.active(out)
+            out = self.active(out)
 
         return out
 
@@ -452,7 +452,7 @@ class spadeunet2Interventor(BaseNetwork):
 
         self.Conv = nn.Conv2d(filters[0], output_nc, kernel_size=1, stride=1, padding=0)
 
-        #self.active = torch.nn.Sigmoid()
+        self.active = torch.nn.Sigmoid()
 
 
     def forward(self, x, extra = None, getatt = False):
@@ -487,7 +487,7 @@ class spadeunet2Interventor(BaseNetwork):
 
             out = self.Conv(d2)
 
-        #  out = self.active(out)
+            out = self.active(out)
 
 
             return out, atts
@@ -504,7 +504,7 @@ class spadeunet2Interventor(BaseNetwork):
 
             out = self.Conv(d2)
 
-        #  out = self.active(out)
+            out = self.active(out)
 
             return out
 

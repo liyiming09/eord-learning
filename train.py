@@ -68,6 +68,8 @@ def main():
                 visuals = OrderedDict([('input_label', trainer.get_semantics().max(dim=1)[1].cpu().unsqueeze(1)),
                                     ('synthesized_image', trainer.get_latest_generated()),
                                     ('real_image', data_i['image']),
+                                    ('intervention_pos', trainer.get_intervention()[0]),
+                                    ('intervention', trainer.get_intervention()[1]),
                                     ('masked', trainer.get_mask())])
     
                 if not opt.no_instance:
