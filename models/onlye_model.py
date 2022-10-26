@@ -15,7 +15,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
 import numpy as np
 
-class LearnEordModel(torch.nn.Module):
+class OnlyEModel(torch.nn.Module):
 
     @staticmethod
     def modify_commandline_options(parser, is_train):
@@ -30,11 +30,6 @@ class LearnEordModel(torch.nn.Module):
         self.ByteTensor = torch.cuda.ByteTensor if self.use_gpu() \
             else torch.ByteTensor
 
-        
-
-        self.netG, self.netD = self.initialize_networks(opt)
-        if self.opt.monce or self.opt.patchnce:
-            self.netF = self.initialize_netF(opt)
         self.netE, self.netED = self.initialize_networksE(opt)
 
        
@@ -48,21 +43,6 @@ class LearnEordModel(torch.nn.Module):
             self.criterioncls = torch.nn.CrossEntropyLoss()
             self.criterionsimlar = networks.CosLoss()
             self.criterionRecons = torch.nn.MSELoss()
-            if not opt.no_vgg_loss:
-                self.criterionVGG = networks.VGGLoss(self.opt.gpu_ids)
-            if opt.use_style_loss:
-                self.criterionStyle = networks.StyleLoss(self.opt.gpu_ids)
-            if self.opt.divco:
-                self.criterionBYol = networks.ByolLoss(self.opt)
-            if self.opt.modeseek:
-                self.criterionModeseek = networks.ModeSeekingLoss(self.opt)
-            if self.opt.monce:
-                self.criterionMoNCE = networks.MoNCELoss(self.opt, self.netF)
-            if self.opt.patchnce:
-                self.criterionPatchNCE = networks.PatchLoss(self.opt, self.netF)
-            if self.opt.effect:
-                self.criterionEffect = networks.EffectLoss(opt.gan_mode, tensor=self.FloatTensor, opt=self.opt)
-
     # Entry point for all calls involving forward pass
     # of deep networks. We used this approach since DataParallel module
     # can't parallelize custom functions, we branch to different
@@ -132,9 +112,7 @@ class LearnEordModel(torch.nn.Module):
 
     def create_optimizers(self, opt):
         E_params = list(self.netE.parameters())
-        G_params = list(self.netG.parameters())
         if opt.isTrain:
-            D_params = list(self.netD.parameters())
             ED_params = list(self.netED.parameters())
 
         if opt.no_TTUR:
@@ -144,57 +122,52 @@ class LearnEordModel(torch.nn.Module):
             beta1, beta2 = 0, 0.9
             G_lr, D_lr, ED_lr = opt.lr / 2, opt.lr * 2, opt.lr * 2
 
-        optimizer_G = torch.optim.Adam(G_params, lr=G_lr/10, betas=(beta1, beta2))
         optimizer_E = torch.optim.Adam(E_params, lr=G_lr, betas=(beta1, beta2))
-        optimizer_D = torch.optim.Adam(D_params, lr=D_lr, betas=(beta1, beta2))
         optimizer_ED = torch.optim.Adam(ED_params, lr=ED_lr, betas=(beta1, beta2))
 
-        return optimizer_G, optimizer_E, optimizer_D, optimizer_ED
+        return  optimizer_E, optimizer_ED
 
     def save(self, epoch):
-        util.save_network(self.netG, 'G', epoch, self.opt)
-        util.save_network(self.netD, 'D', epoch, self.opt)
         util.save_network(self.netE, 'E', epoch, self.opt)
         util.save_network(self.netED, 'ED', epoch, self.opt)
-        if self.opt.monce:
-            util.save_network(self.netF, 'F', epoch, self.opt)
+
 
     ############################################################################
     # Private helper methods
     ############################################################################
 
-    def initialize_networks(self, opt):
-        netG = networks.define_G(opt)
-        netD = networks.define_D(opt) if opt.isTrain else None
+    # def initialize_networks(self, opt):
+    #     netG = networks.define_G(opt)
+    #     netD = networks.define_D(opt) if opt.isTrain else None
 
-        local_rank = self.opt.local_rank
+    #     local_rank = self.opt.local_rank
 
-        # 新增3：DDP backend初始化
-        #   a.根据local_rank来设定当前使用哪块GPU
-        torch.cuda.set_device(local_rank)
-        #   b.初始化DDP，使用默认backend(nccl)就行。如果是CPU模型运行，需要选择其他后端。
-        dist.init_process_group(backend='nccl')
+    #     # 新增3：DDP backend初始化
+    #     #   a.根据local_rank来设定当前使用哪块GPU
+    #     torch.cuda.set_device(local_rank)
+    #     #   b.初始化DDP，使用默认backend(nccl)就行。如果是CPU模型运行，需要选择其他后端。
+    #     dist.init_process_group(backend='nccl')
 
-        # 新增4：定义并把模型放置到单独的GPU上，需要在调用`model=DDP(model)`前做哦。
-        #       如果要加载模型，也必须在这里做哦。
-        device = torch.device("cuda", local_rank)
-        if len(opt.gpu_ids) > 0:
-            # self.pix2pix_model = DataParallelWithCallback(self.pix2pix_model,
-            #                                               device_ids=opt.gpu_ids)
-            netG = torch.nn.SyncBatchNorm.convert_sync_batchnorm(netG).to(device)
-            netG = DDP(netG,find_unused_parameters=False,  device_ids=[local_rank], output_device=local_rank).cuda()
-            if opt.isTrain:
-                netD = torch.nn.SyncBatchNorm.convert_sync_batchnorm(netD).to(device)
-                netD = DDP(netD,find_unused_parameters=True,  device_ids=[local_rank], output_device=local_rank).cuda()
+    #     # 新增4：定义并把模型放置到单独的GPU上，需要在调用`model=DDP(model)`前做哦。
+    #     #       如果要加载模型，也必须在这里做哦。
+    #     device = torch.device("cuda", local_rank)
+    #     if len(opt.gpu_ids) > 0:
+    #         # self.pix2pix_model = DataParallelWithCallback(self.pix2pix_model,
+    #         #                                               device_ids=opt.gpu_ids)
+    #         netG = torch.nn.SyncBatchNorm.convert_sync_batchnorm(netG).to(device)
+    #         netG = DDP(netG,find_unused_parameters=False,  device_ids=[local_rank], output_device=local_rank).cuda()
+    #         if opt.isTrain:
+    #             netD = torch.nn.SyncBatchNorm.convert_sync_batchnorm(netD).to(device)
+    #             netD = DDP(netD,find_unused_parameters=True,  device_ids=[local_rank], output_device=local_rank).cuda()
 
-        netG = util.load_pretrained_net(netG, 'G', opt.which_epoch, opt)
-        if opt.isTrain: netD = util.load_pretrained_net(netD, 'D', opt.which_epoch, opt)
-        if not opt.isTrain or opt.continue_train:
-            netG = util.load_network(netG, 'G', opt.which_epoch, opt)
-            if opt.isTrain:
-                netD = util.load_network(netD, 'D', opt.which_epoch, opt)
+    #     netG = util.load_pretrained_net(netG, 'G', opt.which_epoch, opt)
+    #     if opt.isTrain: netD = util.load_pretrained_net(netD, 'D', opt.which_epoch, opt)
+    #     if not opt.isTrain or opt.continue_train:
+    #         netG = util.load_network(netG, 'G', opt.which_epoch, opt)
+    #         if opt.isTrain:
+    #             netD = util.load_network(netD, 'D', opt.which_epoch, opt)
 
-        return netG, netD
+    #     return netG, netD
     
     def initialize_networksE(self, opt):
         netE = networks.define_E(opt)
@@ -219,14 +192,14 @@ class LearnEordModel(torch.nn.Module):
 
 
 
-    def initialize_netF(self, opt):
-        netF = networks.define_F(opt) if opt.isTrain else None
+    # def initialize_netF(self, opt):
+    #     netF = networks.define_F(opt) if opt.isTrain else None
 
-        if not opt.isTrain or opt.continue_train:
-            if opt.isTrain:
-                netF = util.load_network(netF, 'F', opt.which_epoch, opt)
+    #     if not opt.isTrain or opt.continue_train:
+    #         if opt.isTrain:
+    #             netF = util.load_network(netF, 'F', opt.which_epoch, opt)
 
-        return  netF
+    #     return  netF
 
     # preprocess the input, such as moving the tensors to GPUs and`
     # transforming the label map to one-hot encoding
@@ -346,71 +319,71 @@ class LearnEordModel(torch.nn.Module):
 
         return I_losses
 
-    def compute_generator_loss(self, input_semantics, real_image, masked_image):
-        G_losses = {}
-        fake_image = self.generate_fake(
-            input_semantics[0], real_image, masked_image)
-        pos_image, neg_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
-        # print(2)
-        # if (self.opt.divco) and (not self.eord_flag):
-        #     pred_fake, pred_real, pred_neg, feat = self.discriminate(
-        #         input_semantics, fake_image, real_image, enc_feat = True)
-        # elif self.opt.effect:
-        #     pred_fake, pred_real, pred_neg = self.discriminate(
-        #         input_semantics, fake_image, real_image)
-        # else:
-        pred_fake, pred_real, pred_mask_base, pred_mask_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base', is_generate = True)
-        pred_fake_pos, pred_mask_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, mode = 'pos', is_generate = True)
-        pred_fake_neg, pred_mask_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg', is_generate = True)
-        #pred_mask包括两部分，cls的分类结果，和是否进行了干预，true代表无干预，false代表有
+    # def compute_generator_loss(self, input_semantics, real_image, masked_image):
+    #     G_losses = {}
+    #     fake_image = self.generate_fake(
+    #         input_semantics[0], real_image, masked_image)
+    #     pos_image, neg_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
+    #     # print(2)
+    #     # if (self.opt.divco) and (not self.eord_flag):
+    #     #     pred_fake, pred_real, pred_neg, feat = self.discriminate(
+    #     #         input_semantics, fake_image, real_image, enc_feat = True)
+    #     # elif self.opt.effect:
+    #     #     pred_fake, pred_real, pred_neg = self.discriminate(
+    #     #         input_semantics, fake_image, real_image)
+    #     # else:
+    #     pred_fake, pred_real, pred_mask_base, pred_mask_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base', is_generate = True)
+    #     pred_fake_pos, pred_mask_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, mode = 'pos', is_generate = True)
+    #     pred_fake_neg, pred_mask_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg', is_generate = True)
+    #     #pred_mask包括两部分，cls的分类结果，和是否进行了干预，true代表无干预，false代表有
 
-        G_losses['GAN'] = self.criterionGAN(pred_fake, True,for_discriminator=False) \
-            + self.criterionGAN(pred_fake_pos, True,for_discriminator=False) 
-        G_losses['Mask_recons'] = (self.criterionRecons(self.intervent_pos_mask, self.invent_semantics[1]) + self.criterionRecons(self.intervent_neg_mask, self.invent_semantics[2]) ) * self.opt.lambda_recons
-        G_losses['Mask'] = self.criterionGAN(pred_mask_real, True,for_discriminator=False) \
-            + self.criterionGAN(pred_mask_base, True,for_discriminator=False) \
-                + self.criterionGAN(pred_mask_pos, True,for_discriminator=False) \
-                    + self.criterionGAN(pred_mask_neg, False,for_discriminator=False)
-            #         self.criterioncls(pred_mask_base[0], self.cls.squeeze(1)) \
-            # + self.criterioncls(pred_mask_pos[0], self.cls.squeeze(1)) +  self.criterioncls(pred_mask_neg[0], self.cls.squeeze(1))
-        if not self.opt.no_ganFeat_loss:
-            num_D = len(pred_fake)
-            GAN_Feat_loss = self.FloatTensor(1).fill_(0)
-            for i in range(num_D):  # for each discriminator
-                # last output is the final prediction, so we exclude it
-                num_intermediate_outputs = len(pred_fake[i]) - 1
-                for j in range(num_intermediate_outputs):  # for each layer output
-                    unweighted_loss = self.criterionFeat(
-                        pred_fake[i][j], pred_real[i][j].detach())
-                    GAN_Feat_loss += unweighted_loss * self.opt.lambda_feat / num_D
-            G_losses['GAN_Feat'] = GAN_Feat_loss
+    #     G_losses['GAN'] = self.criterionGAN(pred_fake, True,for_discriminator=False) \
+    #         + self.criterionGAN(pred_fake_pos, True,for_discriminator=False) 
+    #     G_losses['Mask_recons'] = (self.criterionRecons(self.intervent_pos_mask, self.invent_semantics[1]) + self.criterionRecons(self.intervent_neg_mask, self.invent_semantics[2]) ) * self.opt.lambda_recons
+    #     G_losses['Mask'] = self.criterionGAN(pred_mask_real, True,for_discriminator=False) \
+    #         + self.criterionGAN(pred_mask_base, True,for_discriminator=False) \
+    #             + self.criterionGAN(pred_mask_pos, True,for_discriminator=False) \
+    #                 + self.criterionGAN(pred_mask_neg, False,for_discriminator=False)
+    #         #         self.criterioncls(pred_mask_base[0], self.cls.squeeze(1)) \
+    #         # + self.criterioncls(pred_mask_pos[0], self.cls.squeeze(1)) +  self.criterioncls(pred_mask_neg[0], self.cls.squeeze(1))
+    #     if not self.opt.no_ganFeat_loss:
+    #         num_D = len(pred_fake)
+    #         GAN_Feat_loss = self.FloatTensor(1).fill_(0)
+    #         for i in range(num_D):  # for each discriminator
+    #             # last output is the final prediction, so we exclude it
+    #             num_intermediate_outputs = len(pred_fake[i]) - 1
+    #             for j in range(num_intermediate_outputs):  # for each layer output
+    #                 unweighted_loss = self.criterionFeat(
+    #                     pred_fake[i][j], pred_real[i][j].detach())
+    #                 GAN_Feat_loss += unweighted_loss * self.opt.lambda_feat / num_D
+    #         G_losses['GAN_Feat'] = GAN_Feat_loss
 
-        if not self.opt.no_vgg_loss:
-            G_losses['VGG'] = self.criterionVGG(fake_image, real_image) \
-                * self.opt.lambda_vgg
+    #     if not self.opt.no_vgg_loss:
+    #         G_losses['VGG'] = self.criterionVGG(fake_image, real_image) \
+    #             * self.opt.lambda_vgg
 
-        if self.opt.use_style_loss:
-            G_losses['Style'] = self.criterionStyle(fake_image, real_image) \
-                * self.opt.lambda_style
-        if not self.eord_flag:
+    #     if self.opt.use_style_loss:
+    #         G_losses['Style'] = self.criterionStyle(fake_image, real_image) \
+    #             * self.opt.lambda_style
+    #     if not self.eord_flag:
 
-            if self.opt.effect:
-                #效应计算公式：base-neg = (干预前后差别区域，real)
-                # print(pred_neg[0][0].shape)
-                # pred_effect = -pred_neg[0][0] + pred_fake[0][0][0:1,...]
-                effect_map = self.invent_semantics[2] - self.invent_semantics[0]
-                effect_map[effect_map!=0] = 1#赋值为float32类型
+    #         if self.opt.effect:
+    #             #效应计算公式：base-neg = (干预前后差别区域，real)
+    #             # print(pred_neg[0][0].shape)
+    #             # pred_effect = -pred_neg[0][0] + pred_fake[0][0][0:1,...]
+    #             effect_map = self.invent_semantics[2] - self.invent_semantics[0]
+    #             effect_map[effect_map!=0] = 1#赋值为float32类型
 
-                G_losses['Effect'] = self.criterionEffect(pred_fake_neg, pred_fake,effect_map,  True, for_discriminator=False)* self.opt.lambda_effect
-        if self.opt.recons_loss:
-                G_losses['Recons'] = self.criterionRecons(fake_image, real_image) * self.opt.lambda_recons
-        if self.opt.monce:
-            G_losses['MoNCE'] = self.criterionMoNCE(fake_image, real_image, self.bbox)* self.opt.lambda_monce
+    #             G_losses['Effect'] = self.criterionEffect(pred_fake_neg, pred_fake,effect_map,  True, for_discriminator=False)* self.opt.lambda_effect
+    #     if self.opt.recons_loss:
+    #             G_losses['Recons'] = self.criterionRecons(fake_image, real_image) * self.opt.lambda_recons
+    #     if self.opt.monce:
+    #         G_losses['MoNCE'] = self.criterionMoNCE(fake_image, real_image, self.bbox)* self.opt.lambda_monce
         
-        if self.opt.patchnce:
-            G_losses['PatchNCE'] = self.criterionPatchNCE(fake_image, real_image, self.bbox)* self.opt.lambda_monce
+    #     if self.opt.patchnce:
+    #         G_losses['PatchNCE'] = self.criterionPatchNCE(fake_image, real_image, self.bbox)* self.opt.lambda_monce
 
-        return G_losses, fake_image
+    #     return G_losses, fake_image
 
     def compute_discriminator_loss(self, input_semantics, real_image, masked_image):
         D_losses = {}

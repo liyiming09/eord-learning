@@ -2,6 +2,7 @@
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
 
+from email.policy import default
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -242,6 +243,122 @@ class attentionunetInterventor(BaseNetwork):
         return out
 
 
+class vaeInterventor(BaseNetwork):
+    @staticmethod
+    def modify_commandline_options(parser, is_train):
+        parser.set_defaults(norm_G='spectralspadesyncbatch3x3')
+        parser.add_argument('--use_vae', type = bool, default = True, help = "use a noise vector to generate the intervention map")
+        parser.add_argument('--num_upsampling_layers',
+                            choices=('normal', 'more', 'most'), default='normal',
+                            help="If 'more', adds upsampling layer between the two middle resnet blocks. If 'most', also add one more upsampling + resnet layer at the end of the generator")
+
+        return parser
+
+    def __init__(self, opt):
+        super(vaeInterventor, self).__init__()
+        self.opt = opt
+        nf = opt.ngf
+
+        self.opt = opt
+        label_nc = opt.label_nc
+        self.fakeatt = False
+        input_nc = label_nc + (1 if opt.contain_dontcare_label else 0) + (0 if opt.no_instance else 1)+ (0 if opt.no_inpaint else 1)
+        # if opt.mix_input_gen:
+        #     input_nc += 4
+        output_nc = 2
+
+        self.sw, self.sh = self.compute_latent_vector_size(opt)
+
+        if opt.use_vae:
+            # In case of VAE, we will sample from random z vector
+            self.fc = nn.Linear(opt.z_dim, 16 * nf * self.sw * self.sh)
+        else:
+            # Otherwise, we make the network deterministic by starting with
+            # downsampled segmentation map instead of random z
+            self.fc = nn.Conv2d(self.opt.semantic_nc, 16 * nf, 3, padding=1)
+
+        self.head_0 = SPADEResnetBlock(16 * nf, 16 * nf, opt)
+
+        self.G_middle_0 = SPADEResnetBlock(16 * nf, 16 * nf, opt)
+        self.G_middle_1 = SPADEResnetBlock(16 * nf, 16 * nf, opt)
+
+        self.up_0 = SPADEResnetBlock(16 * nf, 8 * nf, opt)
+        self.up_1 = SPADEResnetBlock(8 * nf, 4 * nf, opt)
+        self.up_2 = SPADEResnetBlock(4 * nf, 2 * nf, opt)
+        self.up_3 = SPADEResnetBlock(2 * nf, 1 * nf, opt)
+
+        final_nc = nf
+
+        if opt.num_upsampling_layers == 'most':
+            self.up_4 = SPADEResnetBlock(1 * nf, nf // 2, opt)
+            final_nc = nf // 2
+
+        self.conv_img = nn.Conv2d(final_nc, output_nc, 3, padding=1)
+
+        self.up = nn.Upsample(scale_factor=2)
+
+        self.active = torch.nn.Sigmoid()
+
+    def compute_latent_vector_size(self, opt):
+        if opt.num_upsampling_layers == 'normal':
+            num_up_layers = 5
+        elif opt.num_upsampling_layers == 'more':
+            num_up_layers = 6
+        elif opt.num_upsampling_layers == 'most':
+            num_up_layers = 7
+        else:
+            raise ValueError('opt.num_upsampling_layers [%s] not recognized' %
+                             opt.num_upsampling_layers)
+
+        sw = opt.fineSize // (2**num_up_layers)
+        sh = sw
+
+        return sw, sh
+
+    def forward(self, input, z=None, mode = 'base'):
+        seg = input
+
+        if self.opt.use_vae:
+            # we sample z from unit normal and reshape the tensor
+            if z is None:
+                z = torch.randn(input.size(0), self.opt.z_dim,
+                                dtype=torch.float32, device=input.get_device())
+            x = self.fc(z)
+            x = x.view(-1, 16 * self.opt.ngf, self.sh, self.sw)
+        else:
+            # we downsample segmap and run convolution
+            x = F.interpolate(seg, size=(self.sh, self.sw))
+            x = self.fc(x)
+
+        x = self.head_0(x, seg)
+
+        x = self.up(x)
+        x = self.G_middle_0(x, seg)
+
+        if self.opt.num_upsampling_layers == 'more' or \
+           self.opt.num_upsampling_layers == 'most':
+            x = self.up(x)
+
+        x = self.G_middle_1(x, seg)
+
+        x = self.up(x)
+        x = self.up_0(x, seg)
+        x = self.up(x)
+        x = self.up_1(x, seg)
+        x = self.up(x)
+        x = self.up_2(x, seg)
+        x = self.up(x)
+        x = self.up_3(x, seg)
+
+        if self.opt.num_upsampling_layers == 'most':
+            x = self.up(x)
+            x = self.up_4(x, seg)
+
+        x = self.conv_img(F.leaky_relu(x, 2e-1))
+        x = self.active(x)
+
+        return x
+
 class spadeunetInterventor(BaseNetwork):
     """
     Attention Unet implementation
@@ -404,18 +521,8 @@ class spadeunet2Interventor(BaseNetwork):
         return parser
 
     def __init__(self,opt):
-        """Construct a Unet Interventor
-        Parameters:
-            input_nc (int)  -- the number of channels in input images
-            output_nc (int) -- the number of channels in output images
-            num_downs (int) -- the number of downsamplings in UNet. For example, # if |num_downs| == 7,
-                                image of size 128x128 will become of size 1x1 # at the bottleneck
-            ngf (int)       -- the number of filters in the last conv layer
-            norm_layer      -- normalization layer
+        #Construct a Unet Interventor
 
-        We construct the U-Net from the innermost layer to the outermost layer.
-        It is a recursive process.
-        """
         super(spadeunet2Interventor, self).__init__()
 
         self.opt = opt

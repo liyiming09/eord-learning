@@ -32,6 +32,9 @@ def modify_commandline_options(parser, is_train):
         netD_cls = find_network_using_name(opt.netD, 'discriminator')
         parser = netD_cls.modify_commandline_options(parser, is_train)
 
+        netE_cls = find_network_using_name(opt.netE, 'interventor')
+        parser = netE_cls.modify_commandline_options(parser, is_train)
+
     return parser
 
 

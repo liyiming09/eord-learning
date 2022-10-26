@@ -576,7 +576,7 @@ class MoNCELoss(nn.Module):
         self.vgg = VGG19().cuda()
         # self.criterion = nn.L1Loss()
         self.criterion = CoNCELoss(opt)
-        self.weights = [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
+        self.weights = [ 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
         self.netF = netF
         self.patch_num = 128
 
@@ -612,7 +612,7 @@ class PatchLoss(nn.Module):
         self.vgg = VGG19().cuda()
         # self.criterion = nn.L1Loss()
         self.criterion = PatchNCELoss(opt)
-        self.weights = [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
+        self.weights = [ 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
         self.netF = netF
         self.patch_num = 128
 
