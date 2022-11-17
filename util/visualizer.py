@@ -140,6 +140,18 @@ class Visualizer():
             if 'input_label' == key:
                 #t = util.tensor2label(t, self.opt.label_nc + 2, tile=tile)
                 t = util.tensor2label(t, 255, tile=tile)
+            elif 'intervention_base' == key:
+                #t = util.tensor2label(t, self.opt.label_nc + 2, tile=tile)
+                t = util.tensor2label(t, 255, tile=tile)
+            elif 'intervention_pos' == key or 'intervention_neg' == key or 'eord' in key:
+                t = (np.transpose(t[0].detach().cpu().float().numpy(), (1, 2, 0))    * 255).astype(np.uint8)
+            elif 'attention_map' == key:
+                maps = []
+                for att in t:
+                    tmp = att[0].cpu().squeeze().float().numpy()
+                    tmp = (tmp*255).astype(np.uint8).astype(np.uint8)
+                    maps.append(tmp)
+                t = maps
             elif 'real_label' == key:
                 t = np.transpose(t.cpu().float().numpy(), (1, 2, 0)).astype(np.uint8)
             else:
@@ -161,11 +173,23 @@ class Visualizer():
         links = []
 
         for label, image_numpy in visuals.items():
-            image_name = os.path.join(label, '%s.png' % (name))
-            save_path = os.path.join(image_dir, image_name)
-            util.save_image(image_numpy, save_path, create_dir=True)
+            if label == 'attention_map':
+                for i in range(len(image_numpy)):
+                    new_name = name + '_' + str(i)
+                    image_name = os.path.join(label, '%s.png' % (new_name))
+                    save_path = os.path.join(image_dir, image_name)
+                    util.save_image(image_numpy[i], save_path, create_dir=True)
+                    if i == len(image_numpy) - 1:
+                        ims.append(image_name)
+                        txts.append(label)
+                        links.append(image_name)
 
-            ims.append(image_name)
-            txts.append(label)
-            links.append(image_name)
+            else:
+                image_name = os.path.join(label, '%s.png' % (name))
+                save_path = os.path.join(image_dir, image_name)
+                util.save_image(image_numpy, save_path, create_dir=True)
+
+                ims.append(image_name)
+                txts.append(label)
+                links.append(image_name)
         webpage.add_images(ims, txts, links, width=self.win_size)

@@ -148,8 +148,8 @@ def mkdirs(paths):
 
 def mkdir(path):
     if not os.path.exists(path):
-        # if dist.get_rank() == 0:
-        os.makedirs(path)
+        if dist.get_rank() == 0:
+            os.makedirs(path)
 
 
 def atoi(text):
@@ -209,9 +209,9 @@ def save_network(net, label, epoch, opt):
     if len(opt.gpu_ids) and torch.cuda.is_available():
         net.cuda()
 
-def load_pretrained_net(net, label, epoch, opt):
+def load_pretrained_net(net, label, epoch,save_dir, opt):
     save_filename = '%s_net_%s.pth' % (epoch, label)
-    save_dir = '../attention-divco-projector/checkpoints/effect-spade-unet-10/'
+    
     save_path = os.path.join(save_dir, save_filename)
     weights = torch.load(save_path)
     net.load_state_dict(weights)
