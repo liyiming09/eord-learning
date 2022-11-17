@@ -15,6 +15,10 @@ class TestOptions(BaseOptions):
         parser.add_argument('--tf_log', action='store_true', help='if specified, use tensorboard logging. Requires tensorflow installed')
         parser.add_argument('--niter', type=int, default=0, help='# of iter at starting learning rate. This is NOT the total #epochs. Totla #epochs is niter + niter_decay')
         parser.add_argument('--niter_decay', type=int, default=0, help='# of iter to linearly decay learning rate to zero')
+        parser.add_argument('--use_vae', type = bool, default = True, help = "use a noise vector to generate the intervention map")
+        parser.add_argument('--num_upsampling_layers',
+                            choices=('normal', 'more', 'most'), default='normal',
+                            help="If 'more', adds upsampling layer between the two middle resnet blocks. If 'most', also add one more upsampling + resnet layer at the end of the generator")
 
         #SESAME 
         parser.add_argument('--addition', action='store_true', help='if specified, only sample image patches contain the same object for consistency')

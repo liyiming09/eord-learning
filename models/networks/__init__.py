@@ -81,3 +81,7 @@ def define_E(opt, input_nc=None):
 def define_ED(opt, input_nc=None):
     netED_cls = find_network_using_name('LearnEorD', 'discriminator')
     return create_network(netED_cls, opt, input_nc)
+
+def define_onlyED(opt, input_nc=None):
+    netED_cls = find_network_using_name('OnlyE', 'discriminator')
+    return create_network(netED_cls, opt, input_nc)

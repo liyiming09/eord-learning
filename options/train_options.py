@@ -21,8 +21,8 @@ class TrainOptions(BaseOptions):
         # for training
         parser.add_argument('--continue_train', action='store_true', help='continue training: load the latest model')
         parser.add_argument('--which_epoch', type=str, default='latest', help='which epoch to load? set to latest to use latest cached model')
-        parser.add_argument('--niter', type=int, default=40, help='# of iter at starting learning rate. This is NOT the total #epochs. Totla #epochs is niter + niter_decay')
-        parser.add_argument('--niter_decay', type=int, default=60, help='# of iter to linearly decay learning rate to zero')
+        parser.add_argument('--niter', type=int, default=0, help='# of iter at starting learning rate. This is NOT the total #epochs. Totla #epochs is niter + niter_decay')
+        parser.add_argument('--niter_decay', type=int, default=50, help='# of iter to linearly decay learning rate to zero')
         parser.add_argument('--optimizer', type=str, default='adam')
         parser.add_argument('--beta1', type=float, default=0.5, help='momentum term of adam')
         parser.add_argument('--beta2', type=float, default=0.999, help='momentum term of adam')
@@ -31,6 +31,7 @@ class TrainOptions(BaseOptions):
 
         # for discriminators
         parser.add_argument('--ndf', type=int, default=64, help='# of discrim filters in first conv layer')
+        
         parser.add_argument('--lambda_feat', type=float, default=10.0, help='weight for feature matching loss')
         parser.add_argument('--lambda_vgg', type=float, default=10.0, help='weight for vgg loss')
         parser.add_argument('--lambda_style', type=float, default=250.0, help='weight for style loss')
@@ -38,7 +39,7 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--lambda_divco', type=float, default=0, help='weight for divco loss')
         parser.add_argument('--lambda_ms', type=float, default=0, help='weight for modeseek loss')
         parser.add_argument('--lambda_monce', type=float, default=10, help='weight for monce loss')
-        parser.add_argument('--lambda_recons', type=float, default=100, help='weight for monce loss')
+        parser.add_argument('--lambda_recons', type=float, default=100, help='weight for L1 reconstruction loss')
         parser.add_argument('--no_ganFeat_loss', action='store_true', help='if specified, do *not* use discriminator feature matching loss')
         parser.add_argument('--no_vgg_loss', action='store_true', help='if specified, do *not* use VGG feature matching loss')
         parser.add_argument('--use_style_loss', action='store_true', help='if specified, do use style loss')

@@ -217,7 +217,7 @@ class attentionunetInterventor(BaseNetwork):
 
 
             e1 = self.Conv1(x)
-
+            print(e1.get_device(),x.get_device())
             e2 = self.Maxpool1(e1)
             e2 = self.Conv2(e2)
 
@@ -271,18 +271,18 @@ class vaeInterventor(BaseNetwork):
 
         if opt.use_vae:
             # In case of VAE, we will sample from random z vector
-            self.fc = nn.Linear(opt.z_dim, 16 * nf * self.sw * self.sh)
+            self.fc = nn.Linear(opt.z_dim, 8 * nf * self.sw * self.sh)
         else:
             # Otherwise, we make the network deterministic by starting with
             # downsampled segmentation map instead of random z
-            self.fc = nn.Conv2d(self.opt.semantic_nc, 16 * nf, 3, padding=1)
+            self.fc = nn.Conv2d(self.opt.semantic_nc, 8 * nf, 3, padding=1)
 
-        self.head_0 = SPADEResnetBlock(16 * nf, 16 * nf, opt)
+        self.head_0 = SPADEResnetBlock(8 * nf + 1, 8 * nf, opt)
 
-        self.G_middle_0 = SPADEResnetBlock(16 * nf, 16 * nf, opt)
-        self.G_middle_1 = SPADEResnetBlock(16 * nf, 16 * nf, opt)
+        self.G_middle_0 = SPADEResnetBlock(8 * nf, 8 * nf, opt)
+        self.G_middle_1 = SPADEResnetBlock(8 * nf, 8 * nf, opt)
 
-        self.up_0 = SPADEResnetBlock(16 * nf, 8 * nf, opt)
+        self.up_0 = SPADEResnetBlock(8 * nf, 8 * nf, opt)
         self.up_1 = SPADEResnetBlock(8 * nf, 4 * nf, opt)
         self.up_2 = SPADEResnetBlock(4 * nf, 2 * nf, opt)
         self.up_3 = SPADEResnetBlock(2 * nf, 1 * nf, opt)
@@ -315,16 +315,19 @@ class vaeInterventor(BaseNetwork):
 
         return sw, sh
 
-    def forward(self, input, z=None, mode = 'base'):
+    def forward(self, input, stuff,  z=None, mode = 'base'):
         seg = input
 
         if self.opt.use_vae:
             # we sample z from unit normal and reshape the tensor
             if z is None:
                 z = torch.randn(input.size(0), self.opt.z_dim,
-                                dtype=torch.float32, device=input.get_device())
+                                dtype=torch.float32).cuda()
             x = self.fc(z)
-            x = x.view(-1, 16 * self.opt.ngf, self.sh, self.sw)
+            # print(x.get_device(),z.get_device())
+            x = x.view(-1, 8 * self.opt.ngf, self.sh, self.sw)
+            cur_stuff = F.interpolate(stuff, size=(self.sh, self.sw))
+            x = torch.cat((cur_stuff, x), dim = 1)
         else:
             # we downsample segmap and run convolution
             x = F.interpolate(seg, size=(self.sh, self.sw))

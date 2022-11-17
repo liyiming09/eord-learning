@@ -494,3 +494,56 @@ class LearnEorDDiscriminator(BaseNetwork):
 
     def my_dot(self, x, y):
         return x + x * y.sum(1).unsqueeze(1)
+
+
+class OnlyEDiscriminator(BaseNetwork):
+    @staticmethod
+    def modify_commandline_options(parser, is_train):
+        parser.add_argument('--n_layers_D', type=int, default=4,
+                            help='# layers in each discriminator')
+        return parser
+
+    def __init__(self, opt, label_nc=None):
+        super().__init__()
+        self.opt = opt
+        self.base = self.opt.batchSize//len(self.opt.gpu_ids) #每一个基础单元内有几个实例
+        feat_dim = 128
+        kw = 4
+        padw = int(np.ceil((kw - 1.0) / 2))
+        nf = opt.ndf
+        if label_nc is None:
+            label_nc = 1
+
+        original_nf = nf
+        input_nc = label_nc
+        nf = original_nf
+        norm_layer = get_nonspade_norm_layer(opt, opt.norm_D)
+        sequence = [[nn.Conv2d(input_nc, nf, kernel_size=kw, stride=2, padding=padw),
+                        nn.LeakyReLU(0.2, False)]]
+
+        for n in range(1, opt.n_layers_D):
+            nf_prev = nf
+            nf = min(nf * 2, 512)
+            stride = 1 if n == opt.n_layers_D - 1 else 2
+            sequence += [[norm_layer(nn.Conv2d(nf_prev, nf, kernel_size=kw,
+                                                stride=stride, padding=padw)),
+                            nn.LeakyReLU(0.2, False)
+                            ]]
+
+
+        sequence += [[nn.Conv2d(nf, 1, kernel_size=kw, stride=1, padding=padw)]]
+        sem_sequence = nn.ModuleList()
+        for n in range(len(sequence)):
+            sem_sequence.append(nn.Sequential(*sequence[n]))                 
+        self.sem_sequence = nn.Sequential(*sem_sequence)
+
+        # self.conv_feat = nn.Conv2d(512+256+128+64, feat_dim, 1, 1, 0)
+        # self.feat_bn = nn.BatchNorm2d(feat_dim)
+        # self.predictor = MLP(feat_dim,feat_dim)
+
+    def forward(self, input, enc_feat = False, is_generate = False):
+        # print('input:',input.shape)
+        sem_results = self.sem_sequence(input)
+
+
+        return sem_results

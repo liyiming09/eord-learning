@@ -15,6 +15,7 @@ from util.visualizer import Visualizer
 from trainers.pix2pix_trainer import Pix2PixTrainer
 from trainers.eord_trainer import EorDTrainer
 from trainers.e_trainer import ETrainer
+from trainers.refineg_trainer import RefineGTrainer
 import torch.distributed as dist
 def main():
     # parse options
@@ -28,7 +29,7 @@ def main():
     dataset = data.create_dataset(opt)
 
      # create trainer for our model
-    trainer = ETrainer(opt)
+    trainer = RefineGTrainer(opt)
 
     # load the dataloader
     dataloader = data.create_dataloader(opt, dataset)
