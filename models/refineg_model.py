@@ -9,7 +9,7 @@ import torchvision.transforms as t
 import models.networks as networks
 import util.util as util
 from random import randint, random
-
+from models.DiffAugment_pytorch import DiffAugment
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
@@ -33,9 +33,9 @@ class RefineGModel(torch.nn.Module):
         
 
         self.netG, self.netD = self.initialize_networks(opt)
-        if self.opt.monce or self.opt.patchnce:
+        if self.opt.monce or self.opt.patchnce or self.opt.masknce:
             self.netF = self.initialize_netF(opt)
-        self.netE, self.netED = self.initialize_networksE(opt)
+        if self.opt.vae: self.netE = self.initialize_networksE(opt)
 
        
         
@@ -58,6 +58,11 @@ class RefineGModel(torch.nn.Module):
                 self.criterionModeseek = networks.ModeSeekingLoss(self.opt)
             if self.opt.monce:
                 self.criterionMoNCE = networks.MoNCELoss(self.opt, self.netF)
+            if self.opt.masknce:
+                if self.opt.use_queue:
+                    self.criterionMaskNCE = networks.MaskNCELoss_queue(self.opt, self.netF)
+                else:
+                    self.criterionMaskNCE = networks.MaskNCELoss(self.opt, self.netF)
             if self.opt.patchnce:
                 self.criterionPatchNCE = networks.PatchLoss(self.opt, self.netF)
             if self.opt.effect:
@@ -82,17 +87,19 @@ class RefineGModel(torch.nn.Module):
                     param.requires_grad = requires_grad
 
     def forward(self, data, mode):
-        input_semantics, real_image, masked_image = self.preprocess_input(data)
+        if 'online' in mode:
+            input_semantics, real_image, masked_image = self.preprocess_input_online(data)
+        else:
+            input_semantics, real_image, masked_image = self.preprocess_input(data)
 
-        if  self.opt.eord:
-            
-            self.invent_semantics = []
-            self.base_size = self.opt.batchSize//len(self.opt.gpu_ids)
-            for it in range(len(input_semantics)):
-                tmp_semantics = []
-                for k in range(input_semantics[it].shape[0]):
-                    tmp_semantics.append(input_semantics[it][k:k+1,[self.cls[k%self.base_size,:]]])
-                self.invent_semantics.append(torch.cat(tmp_semantics,dim = 0))
+
+        self.invent_semantics = []
+        self.base_size = self.opt.batchSize//len(self.opt.gpu_ids)
+        for it in range(len(input_semantics)):
+            tmp_semantics = []
+            for k in range(input_semantics[it].shape[0]):
+                tmp_semantics.append(input_semantics[it][k:k+1,[self.cls[k%self.base_size,:]]])
+            self.invent_semantics.append(torch.cat(tmp_semantics,dim = 0))
 
         if mode == 'generator':
             # self.set_requires_grad(self.netD, False)
@@ -100,42 +107,86 @@ class RefineGModel(torch.nn.Module):
             g_loss, generated = self.compute_generator_loss(
                 input_semantics, real_image, masked_image)
             return g_loss, generated, masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
+        elif mode == 'generator_online':
+            # self.set_requires_grad(self.netD, False)
+            # print(1)
+            g_loss, generated = self.compute_generator_loss_online(
+                input_semantics, real_image, masked_image)
+            return g_loss, generated, masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
+
+
+        elif mode == 'generator_onlineonlyeord':
+            # self.set_requires_grad(self.netD, False)
+            # print(1)
+            g_loss, generated = self.compute_generator_loss_onlyeord(
+                input_semantics, real_image, masked_image)
+            return g_loss, generated, masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
+        elif mode == 'discriminator_onlineonlyeord':
+            # self.set_requires_grad(self.netD, True)
+            d_loss = self.compute_discriminator_loss_onlyeord(input_semantics, real_image, masked_image)
+            return d_loss
+
+
+        elif mode == 'generator_noeord':
+            g_loss, generated = self.compute_generator_loss_noeord(
+                input_semantics, real_image, masked_image)
+            return g_loss, generated, masked_image, input_semantics + self.invent_semantics
         elif mode == 'interventor':
             int_loss = self.compute_interventor_loss(input_semantics, real_image, masked_image)
             return int_loss, 0 , masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
         elif mode == 'discriminator':
             # self.set_requires_grad(self.netD, True)
-            d_loss = self.compute_discriminator_loss(
-                input_semantics, real_image, masked_image)
+            d_loss = self.compute_discriminator_loss(input_semantics, real_image, masked_image)
+            return d_loss
+        elif mode == 'discriminator_noeord':
+            # self.set_requires_grad(self.netD, True)
+            d_loss = self.compute_discriminator_loss_noeord(input_semantics, real_image, masked_image)
+            return d_loss
+        elif mode == 'discriminator_online':
+            # self.set_requires_grad(self.netD, True)
+            d_loss = self.compute_discriminator_loss_online(input_semantics, real_image, masked_image)
             return d_loss
         elif mode == 'inference':
             with torch.no_grad():
-                mode = 'base'
-                if mode == 'base':
-                    fake_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'base')
-                    return fake_image, masked_image, input_semantics + self.invent_semantics
-                else:
-                    pos_image, neg_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
-                # fake_image, _ = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
+                fake_images = self.generate_fake( input_semantics[0], real_image, masked_image)
+                fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
 
-                # fake_image = self.generate_fake(input_semantics, real_image, masked_image)
-
-                    return pos_image, masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
-        elif mode == 'test':
+                return [fake_image, pos_image, neg_image], masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
+        elif mode == 'inference_noeord':
             with torch.no_grad():
-                fake_image, atts = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'test')
-                pos_image, neg_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
+                fake_image = self.generate_fake( input_semantics[0], real_image, masked_image, mode = 'noeord')
+                # fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
 
-                return [fake_image,pos_image, neg_image], masked_image, input_semantics + self.invent_semantics+ [self.intervent_pos_mask, self.intervent_neg_mask], atts
+                return fake_image, masked_image, input_semantics + self.invent_semantics
+        elif mode == 'inference_online':
+            with torch.no_grad():
+                fake_images = self.generate_fake( input_semantics, real_image, masked_image, mode = 'online')
+                fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
+
+                return [fake_image, pos_image, neg_image], masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask]
+        elif mode == 'attention':
+            with torch.no_grad():
+
+                fake_images, atts = self.generate_fake( input_semantics[0], real_image, masked_image, mode = 'attention')
+                fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
+                fake_att, pos_att, neg_att = [att[0*self.base_size:1*self.base_size,...] for att in atts], [att[1*self.base_size:2*self.base_size,...] for att in atts], [ att[2*self.base_size:3*self.base_size,...] for att in atts]
+                return [fake_image, pos_image, neg_image], masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask], [fake_att, pos_att, neg_att]
+        elif mode == 'attention_online':
+            with torch.no_grad():
+
+                fake_images, atts = self.generate_fake( input_semantics, real_image, masked_image, mode = 'attention_online')
+                fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
+                fake_att, pos_att, neg_att = [att[0*self.base_size:1*self.base_size,...] for att in atts], [att[1*self.base_size:2*self.base_size,...] for att in atts], [ att[2*self.base_size:3*self.base_size,...] for att in atts]
+                return [fake_image, pos_image, neg_image], masked_image, input_semantics + self.invent_semantics + [self.intervent_pos_mask, self.intervent_neg_mask], [fake_att, pos_att, neg_att]
         else:
             raise ValueError("|mode| is invalid")
 
     def create_optimizers(self, opt):
-        E_params = list(self.netE.parameters())
+        # E_params = list(self.netE.parameters())
         G_params = list(self.netG.parameters())
         if opt.isTrain:
             D_params = list(self.netD.parameters())
-            ED_params = list(self.netED.parameters())
+            # ED_params = list(self.netED.parameters())
 
         if opt.no_TTUR:
             beta1, beta2 = opt.beta1, opt.beta2
@@ -145,19 +196,19 @@ class RefineGModel(torch.nn.Module):
             G_lr, D_lr, ED_lr = opt.lr / 2, opt.lr * 2, opt.lr * 2
 
         optimizer_G = torch.optim.Adam(G_params, lr=G_lr/10, betas=(beta1, beta2))
-        optimizer_E = torch.optim.Adam(E_params, lr=G_lr, betas=(beta1, beta2))
+        # optimizer_E = torch.optim.Adam(E_params, lr=G_lr, betas=(beta1, beta2))
         optimizer_D = torch.optim.Adam(D_params, lr=D_lr, betas=(beta1, beta2))
-        optimizer_ED = torch.optim.Adam(ED_params, lr=ED_lr, betas=(beta1, beta2))
+        # optimizer_ED = torch.optim.Adam(ED_params, lr=ED_lr, betas=(beta1, beta2))
 
-        return optimizer_G, optimizer_E, optimizer_D, optimizer_ED
+        return optimizer_G, optimizer_D
 
     def save(self, epoch):
         util.save_network(self.netG, 'G', epoch, self.opt)
         util.save_network(self.netD, 'D', epoch, self.opt)
-        util.save_network(self.netE, 'E', epoch, self.opt)
-        util.save_network(self.netED, 'ED', epoch, self.opt)
-        if self.opt.monce:
-            util.save_network(self.netF, 'F', epoch, self.opt)
+        # util.save_network(self.netE, 'E', epoch, self.opt)
+        # util.save_network(self.netED, 'ED', epoch, self.opt)
+        # if self.opt.monce:
+        #     util.save_network(self.netF, 'F', epoch, self.opt)
 
     ############################################################################
     # Private helper methods
@@ -173,7 +224,7 @@ class RefineGModel(torch.nn.Module):
         #   a.根据local_rank来设定当前使用哪块GPU
         torch.cuda.set_device(local_rank)
         #   b.初始化DDP，使用默认backend(nccl)就行。如果是CPU模型运行，需要选择其他后端。
-        dist.init_process_group(backend='nccl')
+        # dist.init_process_group(backend='nccl')
 
         # 新增4：定义并把模型放置到单独的GPU上，需要在调用`model=DDP(model)`前做哦。
         #       如果要加载模型，也必须在这里做哦。
@@ -188,9 +239,11 @@ class RefineGModel(torch.nn.Module):
                 netD = DDP(netD,find_unused_parameters=True,  device_ids=[local_rank], output_device=local_rank).cuda()
 
 
-        save_dir = '../attention-divco-projector/checkpoints/effect-spade-unet-10-1/'
-        netG = util.load_pretrained_net(netG, 'G', opt.which_epoch, save_dir, opt)
-        if opt.isTrain: netD = util.load_pretrained_net(netD, 'D', opt.which_epoch, opt)
+        
+        # if opt.isTrain: 
+        #     save_dir = '../attention-divco-projector/checkpoints/effect-spade-unet-10-1/'
+        #     netG = util.load_pretrained_net(netG, 'G', 'latest', save_dir, opt)
+        #     netD = util.load_pretrained_net(netD, 'D', 'latest', save_dir, opt)
         if not opt.isTrain or opt.continue_train:
             netG = util.load_network(netG, 'G', opt.which_epoch, opt)
             if opt.isTrain:
@@ -213,10 +266,11 @@ class RefineGModel(torch.nn.Module):
             #     netED = torch.nn.SyncBatchNorm.convert_sync_batchnorm(netED).to(device)
             #     netED = DDP(netED,find_unused_parameters=False,  device_ids=[local_rank], output_device=local_rank).cuda()
             
-        save_dir = '../eord-learning/checkpoints/only-E-4-vae-D/'
+
+        save_dir = '../eord-learning/checkpoints/only-E-4-vae-D/' if  'city' in self.opt.dataset_mode else '../eord-learning/checkpoints/onlyE-ade-1/'
         netE = util.load_pretrained_net(netE, 'E', 'latest', save_dir, opt)
-        if not opt.isTrain or opt.continue_train:
-            netE = util.load_network(netE, 'E', opt.which_epoch, opt)
+        # if not opt.isTrain or opt.continue_train:
+        #     netE = util.load_network(netE, 'E', opt.which_epoch, opt)
             # if opt.isTrain:
                 # netED = util.load_network(netED, 'ED', opt.which_epoch, opt)
         return netE
@@ -227,9 +281,9 @@ class RefineGModel(torch.nn.Module):
     def initialize_netF(self, opt):
         netF = networks.define_F(opt) if opt.isTrain else None
 
-        if not opt.isTrain or opt.continue_train:
-            if opt.isTrain:
-                netF = util.load_network(netF, 'F', opt.which_epoch, opt)
+        # if not opt.isTrain or opt.continue_train:
+        #     if opt.isTrain:
+        #         netF = util.load_network(netF, 'F', opt.which_epoch, opt)
 
         return  netF
 
@@ -241,7 +295,7 @@ class RefineGModel(torch.nn.Module):
         # move to GPU and change data types
         data['label'] = data['label'].long()
         self.cls = data['cls']
-        if self.opt.monce or self.opt.patchnce:
+        if self.opt.monce or self.opt.patchnce or self.opt.masknce:
             self.bbox = data['bbox']
         if not self.opt.bbox:
             if self.use_gpu():
@@ -332,11 +386,11 @@ class RefineGModel(torch.nn.Module):
         # print(image.shape, image.device,'img')
         return semantics, image, masked
 
-    def online_preprocess_input(self, data):
+    def preprocess_input_online(self, data):
         # move to GPU and change data types
         data['label'] = data['label'].long()
         self.cls = data['cls']
-        if self.opt.monce or self.opt.patchnce:
+        if self.opt.monce or self.opt.patchnce or self.opt.masknce:
             self.bbox = data['bbox']
         if not self.opt.bbox:
             if self.use_gpu():
@@ -448,9 +502,8 @@ class RefineGModel(torch.nn.Module):
 
     def compute_generator_loss(self, input_semantics, real_image, masked_image):
         G_losses = {}
-        fake_images = self.generate_fake(
-            input_semantics[0], real_image, masked_image)
-        fake_image, pos_image, neg_image = fake_images[0:1,...], fake_images[1:2,...], fake_images[2:3,...]
+        fake_images = self.generate_fake( input_semantics[0], real_image, masked_image)
+        fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
         # pos_image, neg_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
         # print(2)
         # if (self.opt.divco) and (not self.eord_flag):
@@ -461,8 +514,8 @@ class RefineGModel(torch.nn.Module):
         #         input_semantics, fake_image, real_image)
         # else:
         pred_fake, pred_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base', is_generate = True)
-        pred_fake_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, mode = 'pos', is_generate = True)
-        pred_fake_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg', is_generate = True)
+        pred_fake_pos = self.discriminate(self.whole_pos_mask, pos_image, real_image, mode = 'pos', is_generate = True)
+        pred_fake_neg = self.discriminate(self.whole_neg_mask, neg_image, real_image, mode = 'neg', is_generate = True)
         #pred_mask包括两部分，cls的分类结果，和是否进行了干预，true代表无干预，false代表有
 
         G_losses['GAN'] = self.criterionGAN(pred_fake, True,for_discriminator=False) \
@@ -493,16 +546,190 @@ class RefineGModel(torch.nn.Module):
         if self.opt.use_style_loss:
             G_losses['Style'] = self.criterionStyle(fake_image, real_image) \
                 * self.opt.lambda_style
-        if not self.eord_flag:
 
-            if self.opt.effect:
-                #效应计算公式：base-neg = (干预前后差别区域，real)
-                # print(pred_neg[0][0].shape)
-                # pred_effect = -pred_neg[0][0] + pred_fake[0][0][0:1,...]
-                effect_map = self.intervent_neg_mask - self.invent_semantics[0]
-                effect_map[effect_map!=0] = 1#赋值为float32类型
+        if self.opt.effect:
+            #效应计算公式：base-neg = (干预前后差别区域，real)
+            # print(pred_neg[0][0].shape)
+            # pred_effect = -pred_neg[0][0] + pred_fake[0][0][0:1,...]
+            #----------------------1. neg-base
+            # effect_map = self.intervent_neg_mask - self.invent_semantics[0]
+            # effect_map[effect_map!=0] = 1
+            #----------------------2. soft-mask: 1-neg
+            src_effect_map = self.intervent_neg_mask.clone()
+            src_effect_map[src_effect_map!=0] = 1#赋值为float32类型
+            effect_map = src_effect_map - self.intervent_neg_mask
 
-                G_losses['Effect'] = self.criterionEffect(pred_fake_neg, pred_fake,effect_map,  True, for_discriminator=False)* self.opt.lambda_effect
+            G_losses['Effect'] = self.criterionEffect(pred_fake_neg, pred_fake, effect_map,  True, for_discriminator=False)* self.opt.lambda_effect
+        if self.opt.recons_loss:
+                G_losses['Recons'] = self.criterionRecons(fake_image, real_image) * self.opt.lambda_recons
+        if self.opt.monce:
+            G_losses['MoNCE'] = self.criterionMoNCE(fake_image, real_image, self.bbox)* self.opt.lambda_monce
+        
+        if self.opt.masknce:
+            neg_map_threshold = self.intervent_neg_mask.clone()
+            neg_map_threshold[neg_map_threshold < 0.2] = 0
+            masknce_map = neg_map_threshold - self.invent_semantics[0]
+            masknce_map[masknce_map!=0] = 1
+            G_losses['MaskNCE'] = self.criterionMaskNCE(fake_image, real_image, self.bbox, mask_pos = self.intervent_pos_mask, mask_neg = masknce_map,  cur_cls = self.cls)* self.opt.lambda_masknce
+
+        if self.opt.patchnce:
+            G_losses['PatchNCE'] = self.criterionPatchNCE(fake_image, real_image, self.bbox)* self.opt.lambda_monce
+
+        return G_losses, fake_image
+    
+    def compute_generator_loss_online(self, input_semantics, real_image, masked_image):
+        G_losses = {}
+        fake_images = self.generate_fake( input_semantics, real_image, masked_image, mode='online')
+
+        if self.opt.diffaug:
+            policy = 'color,cutout'
+            real_image = DiffAugment(real_image, policy=policy)
+            fake_images = DiffAugment(fake_images, policy=policy)
+
+        fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
+        # pos_image, neg_image = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'intervention')
+        # print(2)
+        # if (self.opt.divco) and (not self.eord_flag):
+        #     pred_fake, pred_real, pred_neg, feat = self.discriminate(
+        #         input_semantics, fake_image, real_image, enc_feat = True)
+        # elif self.opt.effect:
+        #     pred_fake, pred_real, pred_neg = self.discriminate(
+        #         input_semantics, fake_image, real_image)
+        # else:
+        pred_fake, pred_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base', is_generate = True)
+        pred_fake_pos = self.discriminate(input_semantics[1], pos_image, real_image, mode = 'pos', is_generate = True)
+        pred_fake_neg = self.discriminate(input_semantics[2], neg_image, real_image, mode = 'neg', is_generate = True)
+        #pred_mask包括两部分，cls的分类结果，和是否进行了干预，true代表无干预，false代表有
+
+        G_losses['GAN_fake'] = self.criterionGAN(pred_fake, True,for_discriminator=False)
+        G_losses['GAN_pos'] = self.criterionGAN(pred_fake_pos, True,for_discriminator=False) 
+        # G_losses['Mask_recons'] = (self.criterionRecons(self.intervent_pos_mask, self.invent_semantics[1]) + self.criterionRecons(self.intervent_neg_mask, self.invent_semantics[2]) ) * self.opt.lambda_recons
+        # G_losses['Mask'] = self.criterionGAN(pred_mask_real, True,for_discriminator=False) \
+        #     + self.criterionGAN(pred_mask_base, True,for_discriminator=False) \
+        #         + self.criterionGAN(pred_mask_pos, True,for_discriminator=False) \
+        #             + self.criterionGAN(pred_mask_neg, False,for_discriminator=False)
+            #         self.criterioncls(pred_mask_base[0], self.cls.squeeze(1)) \
+            # + self.criterioncls(pred_mask_pos[0], self.cls.squeeze(1)) +  self.criterioncls(pred_mask_neg[0], self.cls.squeeze(1))
+        if not self.opt.no_ganFeat_loss:
+            num_D = len(pred_fake)
+            GAN_Feat_loss = self.FloatTensor(1).fill_(0)
+            for i in range(num_D):  # for each discriminator
+                # last output is the final prediction, so we exclude it
+                num_intermediate_outputs = len(pred_fake[i]) - 1
+                for j in range(num_intermediate_outputs):  # for each layer output
+                    unweighted_loss = self.criterionFeat(
+                        pred_fake[i][j], pred_real[i][j].detach())
+                    GAN_Feat_loss += unweighted_loss * self.opt.lambda_feat / num_D
+            G_losses['GAN_Feat'] = GAN_Feat_loss
+
+        if not self.opt.no_vgg_loss:
+            G_losses['VGG'] = self.criterionVGG(fake_image, real_image) \
+                * self.opt.lambda_vgg
+
+        if self.opt.use_style_loss:
+            G_losses['Style'] = self.criterionStyle(fake_image, real_image) \
+                * self.opt.lambda_style
+
+        if self.opt.effect:
+            #效应计算公式：base-neg = (干预前后差别区域，real)
+            # print(pred_neg[0][0].shape)
+            # pred_effect = -pred_neg[0][0] + pred_fake[0][0][0:1,...]
+            #----------------------1. neg-base
+            # effect_map = self.intervent_neg_mask - self.invent_semantics[0]
+            # effect_map[effect_map!=0] = 1
+            #----------------------2. soft-mask: 1-neg
+            src_effect_map = self.intervent_neg_mask.clone()
+            src_effect_map[src_effect_map!=0] = 1#赋值为float32类型
+            effect_map = src_effect_map - self.intervent_neg_mask
+
+            G_losses['Effect'] = self.criterionEffect(pred_fake_neg, pred_fake,effect_map,  True, for_discriminator=False)* self.opt.lambda_effect
+        if self.opt.recons_loss:
+                G_losses['Recons'] = self.criterionRecons(fake_image, real_image) * self.opt.lambda_recons
+        if self.opt.monce:
+            G_losses['MoNCE'] = self.criterionMoNCE(fake_image, real_image, self.bbox)* self.opt.lambda_monce
+        
+        if self.opt.masknce:
+            neg_map_threshold = self.intervent_neg_mask.clone()
+            neg_map_threshold[neg_map_threshold < 0.2] = 0
+            masknce_map = neg_map_threshold - self.invent_semantics[0]
+            masknce_map[masknce_map!=0] = 1
+            G_losses['MaskNCE'] = self.criterionMaskNCE(fake_image, real_image, self.bbox, mask_pos = self.intervent_pos_mask, mask_neg = masknce_map,  cur_cls = self.cls)* self.opt.lambda_masknce
+
+        if self.opt.patchnce:
+            G_losses['PatchNCE'] = self.criterionPatchNCE(fake_image, real_image, self.bbox)* self.opt.lambda_monce
+
+        return G_losses, fake_image
+    
+
+    def compute_generator_loss_onlyeord(self, input_semantics, real_image, masked_image):
+        G_losses = {}
+        fake_images = self.generate_fake( [input_semantics[0], input_semantics[1]], real_image, masked_image, mode='onlyeord')
+        fake_image, pos_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...]
+
+        pred_fake, pred_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base', is_generate = True)
+        pred_fake_pos = self.discriminate(input_semantics[1], pos_image, real_image, mode = 'pos', is_generate = True)
+        #pred_mask包括两部分，cls的分类结果，和是否进行了干预，true代表无干预，false代表有
+
+        G_losses['GAN_fake'] = self.criterionGAN(pred_fake, True,for_discriminator=False)
+        G_losses['GAN_pos'] = self.criterionGAN(pred_fake_pos, True,for_discriminator=False) 
+
+        if not self.opt.no_ganFeat_loss:
+            num_D = len(pred_fake)
+            GAN_Feat_loss = self.FloatTensor(1).fill_(0)
+            for i in range(num_D):  # for each discriminator
+                # last output is the final prediction, so we exclude it
+                num_intermediate_outputs = len(pred_fake[i]) - 1
+                for j in range(num_intermediate_outputs):  # for each layer output
+                    unweighted_loss = self.criterionFeat(
+                        pred_fake[i][j], pred_real[i][j].detach())
+                    GAN_Feat_loss += unweighted_loss * self.opt.lambda_feat / num_D
+            G_losses['GAN_Feat'] = GAN_Feat_loss
+
+        if not self.opt.no_vgg_loss:
+            G_losses['VGG'] = self.criterionVGG(fake_image, real_image) \
+                * self.opt.lambda_vgg
+
+        if self.opt.use_style_loss:
+            G_losses['Style'] = self.criterionStyle(fake_image, real_image) \
+                * self.opt.lambda_style
+
+        return G_losses, fake_image
+
+    def compute_generator_loss_noeord(self, input_semantics, real_image, masked_image):
+        G_losses = {}
+        fake_image = self.generate_fake( input_semantics[0], real_image, masked_image, mode = 'noeord')
+
+        if self.opt.diffaug:
+            policy = 'color,cutout'
+            real_image = DiffAugment(real_image, policy=policy)
+            fake_image = DiffAugment(fake_image, policy=policy)
+
+        pred_fake, pred_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base', is_generate = True)
+
+        #pred_mask包括两部分，cls的分类结果，和是否进行了干预，true代表无干预，false代表有
+
+        G_losses['GAN'] = self.criterionGAN(pred_fake, True,for_discriminator=False) \
+
+        if not self.opt.no_ganFeat_loss:
+            num_D = len(pred_fake)
+            GAN_Feat_loss = self.FloatTensor(1).fill_(0)
+            for i in range(num_D):  # for each discriminator
+                # last output is the final prediction, so we exclude it
+                num_intermediate_outputs = len(pred_fake[i]) - 1
+                for j in range(num_intermediate_outputs):  # for each layer output
+                    unweighted_loss = self.criterionFeat(
+                        pred_fake[i][j], pred_real[i][j].detach())
+                    GAN_Feat_loss += unweighted_loss * self.opt.lambda_feat / num_D
+            G_losses['GAN_Feat'] = GAN_Feat_loss
+
+        if not self.opt.no_vgg_loss:
+            G_losses['VGG'] = self.criterionVGG(fake_image, real_image) \
+                * self.opt.lambda_vgg
+
+        if self.opt.use_style_loss:
+            G_losses['Style'] = self.criterionStyle(fake_image, real_image) \
+                * self.opt.lambda_style
+
         if self.opt.recons_loss:
                 G_losses['Recons'] = self.criterionRecons(fake_image, real_image) * self.opt.lambda_recons
         if self.opt.monce:
@@ -513,6 +740,8 @@ class RefineGModel(torch.nn.Module):
 
         return G_losses, fake_image
 
+
+
     def compute_discriminator_loss(self, input_semantics, real_image, masked_image):
         D_losses = {}
         with torch.no_grad():
@@ -520,43 +749,68 @@ class RefineGModel(torch.nn.Module):
             fake_images = fake_images.detach()
             fake_images.requires_grad_()
 
-            fake_image, pos_image, neg_image = fake_images[0:1,...], fake_images[1:2,...], fake_images[2:3,...]
+            fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
 
-        # pred_fake, pred_real = self.discriminate(
-        #     input_semantics, fake_image, real_image)
-        # if self.opt.modeseek and (not self.eord_flag):
-        #     pred_fake, pred_real, pred_neg, feat = self.discriminate(
-        #         input_semantics, fake_image, real_image, enc_feat = True)
-        # elif self.opt.effect:
-        #     pred_fake, pred_real, pred_neg = self.discriminate(
-        #         input_semantics, fake_image, real_image)
-        # else:
+
         pred_fake, pred_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base')
-        pred_fake_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, mode = 'pos')
-        pred_fake_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg')
+        pred_fake_pos = self.discriminate(self.whole_pos_mask, pos_image, real_image, mode = 'pos')
+        # pred_fake_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg')
 
-        # mask = input_semantics[:,[-1]]
-        # print(self.cls,self.cls.shape)
-        # tmp_semantics = []
-        # for k in range(input_semantics.shape[0]//len(self.opt.gpu_ids)):
-        #     tmp_semantics.append(input_semantics[:,[self.cls[k,:]]])
-        # invent_semantics = torch.cat(tmp_semantics, 1)
-        # print(tmp_semantics[-1].shape,invent_semantics.shape)
-        # invent_semantics = input_semantics[:,[self.cls]]
-        # print(input_semantics.shape, invent_semantics.shape)
-        # D_losses['D_Mask'] = self.criterionGAN(pred_mask_real[1], True,for_discriminator=True) \
-        #     + self.criterionGAN(pred_mask_base[1], True,for_discriminator=True) \
-        #         + self.criterionGAN(pred_mask_pos[1], False,for_discriminator=True) \
-        #             + self.criterionGAN(pred_mask_neg[1], False,for_discriminator=True) 
-        # D_losses['D_CLS'] = self.criterioncls(pred_mask_base[0], self.cls.squeeze(1)) \
-        #     + self.criterioncls(pred_mask_pos[0], self.cls.squeeze(1))\
-        #         + self.criterioncls(pred_mask_real[0], self.cls.squeeze(1))
-        # xx = self.criterioncls(pred_mask_neg[0], self.cls.squeeze(1))
-             #input B，C  target:B,1
-        # D_losses['D_Similar'] = self.criterionsimlar(pred_mask_real[2], pred_mask_real[3]) + self.criterionsimlar(pred_mask_base[2], pred_mask_pos[3]) + self.criterionsimlar(pred_mask_pos[2], pred_mask_base[3])
-        D_losses['D_Fake'] = self.criterionGAN(pred_fake, False,for_discriminator=True)\
-            + self.criterionGAN(pred_fake_pos, False,for_discriminator=True) \
-                + self.criterionGAN(pred_fake_neg, False,for_discriminator=True)
+
+        D_losses['D_Fake'] = self.criterionGAN(pred_fake, False,for_discriminator=True)
+        D_losses['D_Pos'] = self.criterionGAN(pred_fake_pos, False,for_discriminator=True) 
+
+        D_losses['D_real'] = self.criterionGAN(pred_real, True,for_discriminator=True)
+        # if self.opt.modeseek and (not self.eord_flag):
+        #     D_losses['D_ms'] = self.criterionModeseek(feat,self.invent_semantics)* self.opt.lambda_ms#
+        return D_losses
+
+    def compute_discriminator_loss_noeord(self, input_semantics, real_image, masked_image):
+        D_losses = {}
+        with torch.no_grad():
+            fake_images = self.generate_fake(input_semantics[0], real_image, masked_image, mode = 'noeord')
+            if self.opt.diffaug:
+                policy = 'color,cutout'
+                real_image = DiffAugment(real_image, policy=policy)
+                fake_images = DiffAugment(fake_images, policy=policy)
+            fake_image = fake_images.detach()
+            fake_image.requires_grad_()
+
+            # fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
+
+
+        pred_fake, pred_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base')
+        # pred_fake_pos = self.discriminate(self.intervent_pos_mask, pos_image, real_image, mode = 'pos')
+        # pred_fake_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg')
+
+
+        D_losses['D_Fake'] = self.criterionGAN(pred_fake, False,for_discriminator=True)
+
+        D_losses['D_real'] = self.criterionGAN(pred_real, True,for_discriminator=True)
+
+        return D_losses
+
+    def compute_discriminator_loss_online(self, input_semantics, real_image, masked_image):
+        D_losses = {}
+        with torch.no_grad():
+            fake_images = self.generate_fake(input_semantics, real_image, masked_image, mode = 'online')
+            if self.opt.diffaug:
+                policy = 'color,cutout'
+                real_image = DiffAugment(real_image, policy=policy)
+                fake_images = DiffAugment(fake_images, policy=policy)
+            fake_images = fake_images.detach()
+            fake_images.requires_grad_()
+
+            fake_image, pos_image, neg_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...], fake_images[2*self.base_size:3*self.base_size,...]
+
+
+        pred_fake, pred_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base')
+        pred_fake_pos = self.discriminate(input_semantics[1], pos_image, real_image, mode = 'pos')
+        # pred_fake_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg')
+
+
+        D_losses['D_Fake'] = self.criterionGAN(pred_fake, False,for_discriminator=True)
+        D_losses['D_Pos'] = self.criterionGAN(pred_fake_pos, False,for_discriminator=True) 
 
         D_losses['D_real'] = self.criterionGAN(pred_real, True,for_discriminator=True)
         # if self.opt.modeseek and (not self.eord_flag):
@@ -564,42 +818,143 @@ class RefineGModel(torch.nn.Module):
         return D_losses
 
 
+    def compute_discriminator_loss_onlyeord(self, input_semantics, real_image, masked_image):
+        D_losses = {}
+        with torch.no_grad():
+            fake_images = self.generate_fake([input_semantics[0], input_semantics[1]], real_image, masked_image, mode = 'onlyeord')
+            fake_images = fake_images.detach()
+            fake_images.requires_grad_()
+
+            fake_image, pos_image = fake_images[0*self.base_size:1*self.base_size,...], fake_images[1*self.base_size:2*self.base_size,...]
+
+
+        pred_fake, pred_real = self.discriminate(input_semantics[0], fake_image, real_image, mode = 'base')
+        pred_fake_pos = self.discriminate(input_semantics[1], pos_image, real_image, mode = 'pos')
+        # pred_fake_neg = self.discriminate(self.intervent_neg_mask, neg_image, real_image, mode = 'neg')
+
+
+        D_losses['D_Fake'] = self.criterionGAN(pred_fake, False,for_discriminator=True)
+        D_losses['D_Pos'] = self.criterionGAN(pred_fake_pos, False,for_discriminator=True) 
+
+        D_losses['D_real'] = self.criterionGAN(pred_real, True,for_discriminator=True)
+        return D_losses
+
     def generate_intervention(self, input_semantics, real_image, masked_image = None, mode = 'base'):
-        intervent_fakemask = self.netE(input_semantics, mode = mode)
+        intervent_fakemask = self.netE(input_semantics, self.invent_semantics[0], mode = mode)
         self.intervent_pos_mask = intervent_fakemask[:,0:1,...].clone()
         self.intervent_neg_mask = intervent_fakemask[:,1:2,...].clone()
 
     def generate_fake(self, input_semantics, real_image, masked_image = None, mode = 'base'):
         #这一种实现方案是并行一次生成的
         if not self.opt.no_inpaint:
-            mask = input_semantics[:,[-1]]
-            if mode == 'intervention':
-                intervent_fakemask = self.netE(input_semantics, mode = mode)
-                self.intervent_pos_mask = intervent_fakemask[:,0:1,...].clone()
-                self.intervent_neg_mask = intervent_fakemask[:,1:2,...].clone()
+            if 'online' in mode or mode == 'onlyeord':
+                mask = input_semantics[0][:,[-1]]
+            else:
+                mask = input_semantics[:,[-1]]
+            if mode == 'base':
+                with torch.no_grad():
+                    intervent_fakemask = self.netE(input_semantics, self.invent_semantics[0], mode = mode)
+                    self.intervent_pos_mask = intervent_fakemask[:,0:1,...].detach()
+                    self.intervent_neg_mask = intervent_fakemask[:,1:2,...].detach()
                 self.whole_pos_mask = input_semantics.clone()
                 self.whole_neg_mask = input_semantics.clone()
                 for k in range(input_semantics.shape[0]):
-                    self.whole_pos_mask[k:k+1,[self.cls[k%self.base_size,:]]] = self.intervent_pos_mask[k:k+1,...].clone()
-                    self.whole_neg_mask[k:k+1,[self.cls[k%self.base_size,:]]] = self.intervent_neg_mask[k:k+1,...].clone()
-                fake_pos_image = self.netG(masked_image, self.whole_pos_mask)
+                    self.whole_pos_mask[k:k+1,[self.cls[k%self.base_size,:]]] = self.intervent_pos_mask[k:k+1,...].detach()
+                    self.whole_neg_mask[k:k+1,[self.cls[k%self.base_size,:]]] = self.intervent_neg_mask[k:k+1,...].detach()
                 input_masked_image = masked_image.repeat(3,1,1,1)
                 eord_input_semantics = torch.cat((input_semantics,self.whole_pos_mask, self.whole_neg_mask ),0)
 
                 fake_image = self.netG(input_masked_image, eord_input_semantics)
 
                 if not self.opt.no_mix_real_fake:
+                    mask = mask.repeat(3,1,1,1)
+                    repeat_real_image = real_image.repeat(3,1,1,1)
+                    # fake_pos_image = (1 - mask) * real_image + mask * fake_pos_image 
+                    # fake_neg_image = (1 - mask) * real_image + mask * fake_neg_image 
+                    fake_image = (1 - mask) * repeat_real_image + mask * fake_image 
+                return fake_image
+                
+            elif mode == 'online':
+                input_masked_image = masked_image.repeat(3,1,1,1)
+                eord_input_semantics = torch.cat(input_semantics,0)
+
+                fake_image = self.netG(input_masked_image, eord_input_semantics)
+                self.intervent_pos_mask = self.invent_semantics[1]
+                self.intervent_neg_mask = self.invent_semantics[2]
+                if not self.opt.no_mix_real_fake:
+                    mask = mask.repeat(3,1,1,1)
+                    repeat_real_image = real_image.repeat(3,1,1,1)
+                    # fake_pos_image = (1 - mask) * real_image + mask * fake_pos_image 
+                    # fake_neg_image = (1 - mask) * real_image + mask * fake_neg_image 
+                    fake_image = (1 - mask) * repeat_real_image + mask * fake_image 
+                return fake_image
+
+            elif mode == 'onlyeord':
+                input_masked_image = masked_image.repeat(2,1,1,1)
+                eord_input_semantics = torch.cat(input_semantics,0)
+
+                fake_image = self.netG(input_masked_image, eord_input_semantics)
+                self.intervent_pos_mask = self.invent_semantics[1]
+                self.intervent_neg_mask = self.invent_semantics[2]
+                if not self.opt.no_mix_real_fake:
+                    mask = mask.repeat(2,1,1,1)
+                    repeat_real_image = real_image.repeat(2,1,1,1)
+                    # fake_pos_image = (1 - mask) * real_image + mask * fake_pos_image 
+                    # fake_neg_image = (1 - mask) * real_image + mask * fake_neg_image 
+                    fake_image = (1 - mask) * repeat_real_image + mask * fake_image 
+                return fake_image
+
+            elif mode == 'attention':
+                # fake_image, atts = self.netG(masked_image, input_semantics, getatt = True)
+                with torch.no_grad():
+                    intervent_fakemask = self.netE(input_semantics, self.invent_semantics[0], mode = mode)
+                    self.intervent_pos_mask = intervent_fakemask[:,0:1,...].detach()
+                    self.intervent_neg_mask = intervent_fakemask[:,1:2,...].detach()
+                self.whole_pos_mask = input_semantics.clone()
+                self.whole_neg_mask = input_semantics.clone()
+                for k in range(input_semantics.shape[0]):
+                    self.whole_pos_mask[k:k+1,[self.cls[k%self.base_size,:]]] = self.intervent_pos_mask[k:k+1,...].detach()
+                    self.whole_neg_mask[k:k+1,[self.cls[k%self.base_size,:]]] = self.intervent_neg_mask[k:k+1,...].detach()
+                input_masked_image = masked_image.repeat(3,1,1,1)
+                eord_input_semantics = torch.cat((input_semantics,self.whole_pos_mask, self.whole_neg_mask ),0)
+
+                fake_image, atts = self.netG(input_masked_image, eord_input_semantics, getatt = True)
+
+                if not self.opt.no_mix_real_fake:
+                    mask = mask.repeat(3,1,1,1)
+                    repeat_real_image = real_image.repeat(3,1,1,1)
+                    # fake_pos_image = (1 - mask) * real_image + mask * fake_pos_image 
+                    # fake_neg_image = (1 - mask) * real_image + mask * fake_neg_image 
+                    fake_image = (1 - mask) * repeat_real_image + mask * fake_image 
+                return fake_image, atts
+            elif mode == 'attention_online':
+                # fake_image, atts = self.netG(image_mask, input_semantics, getatt = True)
+
+                input_masked_image = masked_image.repeat(3,1,1,1)
+                eord_input_semantics = torch.cat(input_semantics,0)
+
+                fake_image, atts = self.netG(input_masked_image, eord_input_semantics, getatt = True)
+                self.intervent_pos_mask = self.invent_semantics[1]
+                self.intervent_neg_mask = self.invent_semantics[2]
+                if not self.opt.no_mix_real_fake:
+                    mask = mask.repeat(3,1,1,1)
+                    repeat_real_image = real_image.repeat(3,1,1,1)
+                    # fake_pos_image = (1 - mask) * real_image + mask * fake_pos_image 
+                    # fake_neg_image = (1 - mask) * real_image + mask * fake_neg_image 
+                    fake_image = (1 - mask) * repeat_real_image + mask * fake_image 
+
+                return fake_image, atts
+            
+
+        
+            elif mode == 'noeord':
+                fake_image = self.netG(masked_image, input_semantics)
+
+                if not self.opt.no_mix_real_fake:
                     # fake_pos_image = (1 - mask) * real_image + mask * fake_pos_image 
                     # fake_neg_image = (1 - mask) * real_image + mask * fake_neg_image 
                     fake_image = (1 - mask) * real_image + mask * fake_image 
                 return fake_image
-                
-            elif mode == 'test':
-                fake_image, atts = self.netG(masked_image, input_semantics, getatt = True)
-
-                if not self.opt.no_mix_real_fake:
-                    fake_image = (1 - mask) * real_image + mask * fake_image 
-                return fake_image, atts
             else:
                 print("error in intervention generation stage!")
         else:
@@ -699,10 +1054,10 @@ class RefineGModel(torch.nn.Module):
 
         else:#干预时，输入的mask只为1,H，W
             if mode == 'pos':
-                fake_concat = torch.cat([self.whole_pos_mask, fake_image], dim=1)
+                fake_concat = torch.cat([input_semantics, fake_image], dim=1)
                 # ED_cooncat = torch.cat([self.intervent_pos_mask, fake_image], dim=1)
             else:
-                fake_concat = torch.cat([self.whole_neg_mask, fake_image], dim=1)
+                fake_concat = torch.cat([input_semantics, fake_image], dim=1)
                 # ED_cooncat = torch.cat([self.intervent_neg_mask, fake_image], dim=1)
 
             if not enc_feat:

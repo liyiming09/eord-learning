@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from models.networks.conce import CoNCELoss, PatchNCELoss
+from models.networks.conce import CoNCELoss, PatchNCELoss, MaskCoNCELoss, MaskCoNCELoss_queue
 # from models.networks.architecture import VGG19
 import torch.distributed as dist
 
@@ -543,7 +543,7 @@ class EffectLoss(nn.Module):
         #     else:
         #         return input.mean()
         target_tensor = self.get_target_tensor(input, semantics, target_is_real)
-        return F.mse_loss(input, target_tensor, reduction='sum')/10000
+        return F.mse_loss(input, target_tensor, reduction='mean')
 
     def __call__(self, input_neg,input_fake,  semantics, target_is_real, for_discriminator=True):
         # computing loss is a bit complicated because |input| may not be
@@ -634,6 +634,143 @@ class PatchLoss(nn.Module):
                 print('too small region')
                 continue
             loss += self.weights[i] * self.criterion(feat_q_pool[i], feat_k_pool[i])
+
+        # print('******', loss.mean())
+        # 1/0
+
+
+        return loss
+
+class MaskNCELoss(nn.Module):
+    def __init__(self, opt, netF):
+        super(MaskNCELoss, self).__init__()
+        # self.opt = opt
+        self.vgg = VGG19().cuda()
+        # self.criterion = nn.L1Loss()
+        self.criterion = MaskCoNCELoss(opt)
+        self.weights = [ 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
+        self.netF = netF
+        self.patch_num = 256
+
+
+    def forward(self, x, y, bbox, mask_pos, mask_neg, cur_cls = None):
+        # print('img.shape:',x.shape,y.shape)
+        x_vgg, y_vgg = self.vgg(x), self.vgg(y)
+        
+        x_vggs = [x_vgg['relu1_1'],x_vgg['relu2_1'],x_vgg['relu3_1'],x_vgg['relu4_1']]
+        y_vggs = [y_vgg['relu1_1'],y_vgg['relu2_1'],y_vgg['relu3_1'],y_vgg['relu4_1']]
+        feat_k_pool, sample_ids, sample_mask = self.netF(y_vggs, bbox, self.patch_num, None, None, mask_pos = mask_pos, mask_neg = mask_neg)
+        feat_q_pool, _, _ = self.netF(x_vggs, bbox, self.patch_num, sample_ids, sample_mask, mask_pos = mask_pos, mask_neg = mask_neg) # synthesis
+            
+
+        loss = 0
+        for i in range(len(x_vggs)):
+            # print(i, 'input:',feat_q_pool[i].shape, feat_k_pool[i].shape)
+            if feat_q_pool[i][0].shape[0] == 0:
+                print('too small region')
+                continue
+            loss += self.weights[i] * self.criterion(feat_q_pool[i], feat_k_pool[i], i)
+
+        # print('******', loss.mean())
+        # 1/0
+
+
+        return loss
+
+class MaskNCELoss_queue(nn.Module):
+    def __init__(self, opt, netF):
+        super(MaskNCELoss_queue, self).__init__()
+        self.opt = opt
+        self.vgg = VGG19().cuda()
+        # self.criterion = nn.L1Loss()
+        self.criterion = MaskCoNCELoss_queue(opt)
+        self.weights = [ 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
+        self.netF = netF
+        self.patch_num = 256
+
+        self.cls = opt.label_nc
+        self.dim = [64, 128, 256, 512]
+        self.queue_num = opt.queue_num
+
+        self.register_buffer("queue64", torch.randn(3, self.cls, self.dim[0], self.queue_num))
+        self.queue64 = torch.nn.functional.normalize(self.queue64, dim=1).cuda()
+        self.register_buffer("queue_ptr64", torch.zeros([3, self.cls, 1], dtype=torch.long))
+
+        self.register_buffer("queue128", torch.randn(3, self.cls, self.dim[1], self.queue_num))
+        self.queue128 = torch.nn.functional.normalize(self.queue128, dim=1).cuda()
+        self.register_buffer("queue_ptr128", torch.zeros([3, self.cls, 1], dtype=torch.long))
+
+        self.register_buffer("queue256", torch.randn(3, self.cls, self.dim[2], self.queue_num))
+        self.queue256 = torch.nn.functional.normalize(self.queue256, dim=1).cuda()
+        self.register_buffer("queue_ptr256", torch.zeros([3, self.cls, 1], dtype=torch.long))
+
+        self.register_buffer("queue512", torch.randn(3, self.cls, self.dim[3], self.queue_num))
+        self.queue512 = torch.nn.functional.normalize(self.queue512, dim=1).cuda()
+        self.register_buffer("queue_ptr512", torch.zeros([3, self.cls, 1], dtype=torch.long))
+
+        self.queue = [self.queue64, self.queue128, self.queue256, self.queue512]
+        self.queue_ptr = [self.queue_ptr64, self.queue_ptr128, self.queue_ptr256, self.queue_ptr512]
+
+        self.badproto = [torch.ones(64,1).cuda(), torch.ones(128,1).cuda(), torch.ones(256,1).cuda(), torch.ones(512,1).cuda()]
+
+    @torch.no_grad()
+    def concat_all_gather(self, tensor):
+        """
+        Performs all_gather operation on the provided tensors.
+        *** Warning ***: torch.distributed.all_gather has no gradient.
+        """
+        tensors_gather = [torch.ones_like(tensor)
+            for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+
+        output = torch.cat(tensors_gather, dim=0)
+        return output
+
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, scale, protos, cur_clss):
+        # gather keys before updating queue
+        # cur_clss = self.concat_all_gather(cur_cls)
+        for index, proto in enumerate(protos):
+            if proto == None: continue
+            keys = self.concat_all_gather(proto)
+            
+            
+            batch_size = keys.shape[0]
+            keys = torch.nn.functional.normalize(keys, dim=1)
+            
+            if batch_size > 1 and self.queue_num % batch_size == 0 : # for simplicity
+
+            # replace the keys at ptr (dequeue and enqueue)
+                for k in range(cur_clss.shape[0]):
+                    ptr = int(self.queue_ptr[scale][index, cur_clss[k], 0])
+                    self.queue[scale][index, cur_clss[k],:, ptr:ptr + 1] = keys[k].T.unsqueeze(1)
+                    ptr = (ptr + 1) % self.queue_num  # move pointer
+
+                    self.queue_ptr[scale][index, cur_clss[k], 0] = ptr
+
+
+    def forward(self, x, y, bbox, mask_pos, mask_neg, cur_cls = None):
+        # print('img.shape:',x.shape,y.shape)
+        x_vgg, y_vgg = self.vgg(x), self.vgg(y)
+        
+        x_vggs = [x_vgg['relu1_1'],x_vgg['relu2_1'],x_vgg['relu3_1'],x_vgg['relu4_1']]
+        y_vggs = [y_vgg['relu1_1'],y_vgg['relu2_1'],y_vgg['relu3_1'],y_vgg['relu4_1']]
+        for b in range(x.shape[0]):
+            feat_k_pool, sample_ids, sample_mask = self.netF(y_vggs, bbox, b, self.patch_num, None, None, mask_pos = mask_pos, mask_neg = mask_neg)
+            feat_q_pool, _, _ = self.netF(x_vggs, bbox, b, self.patch_num, sample_ids, sample_mask, mask_pos = mask_pos, mask_neg = mask_neg) # synthesis
+                
+
+            loss = 0
+            cur_b_cls = self.concat_all_gather(cur_cls[b])
+            for i in range(len(x_vggs)):
+                # print(i, 'input:',feat_q_pool[i].shape, feat_k_pool[i].shape)
+                if feat_q_pool[i][0].shape[0] == 0:
+                    # print('too small region')
+                    if not self.opt.no_select: self._dequeue_and_enqueue(i, [self.badproto[i], self.badproto[i], self.badproto[i]], cur_b_cls)
+                else:
+                    masknce, protos = self.criterion(feat_q_pool[i], feat_k_pool[i], i, cur_cls[b], self.queue[i])
+                    loss += self.weights[i] * masknce
+                    if not self.opt.no_select: self._dequeue_and_enqueue(i, protos, cur_b_cls)
 
         # print('******', loss.mean())
         # 1/0

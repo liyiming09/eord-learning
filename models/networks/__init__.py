@@ -10,7 +10,8 @@ from models.networks.discriminator import *
 from models.networks.generator import * 
 from models.networks.sampler import * 
 import util.util as util
-
+from modules.vgg import vgg16, vgg16_bn
+from modules.resnet import resnet50, resnet101
 
 def find_network_using_name(target_network_name, filename):
     target_class_name = target_network_name + filename
@@ -85,3 +86,10 @@ def define_ED(opt, input_nc=None):
 def define_onlyED(opt, input_nc=None):
     netED_cls = find_network_using_name('OnlyE', 'discriminator')
     return create_network(netED_cls, opt, input_nc)
+def define_C(opt, input_nc=None):
+    if opt.netC == 'vgg':
+        netC = vgg16(pretrained=False).cuda()
+    elif opt.netC == 'resnet':
+        # model = resnet101(pretrained=True).cuda()
+        netC = resnet50(pretrained=False).cuda()
+    return netC

@@ -547,3 +547,206 @@ class OnlyEDiscriminator(BaseNetwork):
 
 
         return sem_results
+
+
+class SesameMultiscaleDiscriminator(BaseNetwork):
+    @staticmethod
+    def modify_commandline_options(parser, is_train):
+        parser.add_argument('--netD_subarch', type=str, default='sesame_n_layer',
+                            help='architecture of each discriminator')
+        parser.add_argument('--num_D', type=int, default=2,
+                            help='number of discriminators to be used in multiscale')
+        opt, _ = parser.parse_known_args()
+
+        # define properties of each discriminator of the multiscale discriminator
+        subnetD = util.find_class_in_module(opt.netD_subarch + 'discriminator',
+                                            'models.networks.discriminator')
+        subnetD.modify_commandline_options(parser, is_train)
+
+        return parser
+
+    def __init__(self, opt, input_nc = None):
+        super().__init__()
+        self.opt = opt
+
+        for i in range(opt.num_D):
+            subnetD = self.create_single_discriminator(opt, input_nc)
+            self.add_module('discriminator_%d' % i, subnetD)
+
+    def create_single_discriminator(self, opt, input_nc = None):
+        subarch = opt.netD_subarch
+        if subarch == 'sesame_n_layer':
+            netD = SesameNLayerDiscriminator(opt, input_nc)
+        else:
+            raise ValueError('unrecognized discriminator subarchitecture %s' % subarch)
+        return netD
+
+    def downsample(self, input):
+        return F.avg_pool2d(input, kernel_size=3,
+                            stride=2, padding=[1, 1],
+                            count_include_pad=False)
+
+    # Returns list of lists of discriminator outputs.
+    # The final result is of size opt.num_D x opt.n_layers_D
+    def forward(self, input):
+        result = []
+        get_intermediate_features = not self.opt.no_ganFeat_loss
+        for name, D in self.named_children():
+            out = D(input)
+            if not get_intermediate_features:
+                out = [out]
+            result.append(out)
+            input = self.downsample(input)
+
+        return result
+
+
+# # Defines the patchGAN discriminator with the specified arguments.
+# class pix2pixDiscriminator(BaseNetwork):
+#     @staticmethod
+#     def modify_commandline_options(parser, is_train):
+#         parser.add_argument('--n_layers_D', type=int, default=4,
+#                             help='# layers in each discriminator')
+#         return parser
+
+#     def __init__(self, opt, input_nc=None):
+#         super().__init__()
+#         self.opt = opt
+
+#         kw = 4
+#         padw = int(np.ceil((kw - 1.0) / 2))
+#         nf = opt.ndf
+#         if input_nc is None:
+#             input_nc = self.compute_D_input_nc(opt)
+
+#         branch = []
+#         sizes = (input_nc - 3, 3) 
+#         original_nf = nf
+#         for input_nc in sizes: 
+#             nf = original_nf
+#             norm_layer = get_nonspade_norm_layer(opt, opt.norm_D)
+#             sequence = [[nn.Conv2d(input_nc, nf, kernel_size=kw, stride=2, padding=padw),
+#                          nn.LeakyReLU(0.2, False)]]
+
+#             for n in range(1, opt.n_layers_D):
+#                 nf_prev = nf
+#                 nf = min(nf * 2, 512)
+#                 stride = 1 if n == opt.n_layers_D - 1 else 2
+#                 sequence += [[norm_layer(nn.Conv2d(nf_prev, nf, kernel_size=kw,
+#                                                    stride=stride, padding=padw)),
+#                               nn.LeakyReLU(0.2, False)
+#                               ]]
+
+#             branch.append(sequence)
+            
+#         sem_sequence = nn.ModuleList()
+#         for n in range(len(branch[0])):
+#             sem_sequence.append(nn.Sequential(*branch[0][n]))
+#         self.sem_sequence = nn.Sequential(*sem_sequence)
+
+#         sequence = branch[1]
+#         sequence += [[nn.Conv2d(nf, 1, kernel_size=kw, stride=1, padding=padw)]]
+
+#         # We divide the layers into groups to extract intermediate layer outputs
+#         self.img_sequence = nn.ModuleList()
+#         for n in range(len(sequence)):
+#             self.img_sequence.append(nn.Sequential(*sequence[n]))
+
+#     def compute_D_input_nc(self, opt):
+#         label_nc = opt.label_nc
+#         input_nc = label_nc + opt.output_nc
+#         if opt.contain_dontcare_label:
+#             input_nc += 1
+#         if not opt.no_instance:
+#             input_nc += 1
+#         if not opt.no_inpaint:
+#             input_nc += 1
+            
+#         return input_nc
+
+#     def forward(self, input):
+#         img, sem = input[:,-3:], input[:,:-3]
+#         sem_results = self.sem_sequence(sem)
+#         results = [img]
+#         for submodel in self.img_sequence[:-1]:
+#             intermediate_output = submodel(results[-1])
+#             results.append(intermediate_output)
+
+#         intermediate_output = self.my_dot(intermediate_output, sem_results)
+#         results.append(self.img_sequence[-1](intermediate_output))
+
+#         get_intermediate_features = not self.opt.no_ganFeat_loss
+#         if get_intermediate_features:
+#             return results[1:]
+#         else:
+#             return results[-1]
+
+#     def my_dot(self, x, y):
+#         return x + x * y.sum(1).unsqueeze(1)
+
+import functools
+class pix2pixDiscriminator(BaseNetwork):
+    """Defines a PatchGAN discriminator"""
+
+    def __init__(self, opt, input_nc = None, n_layers=3, norm_layer=nn.InstanceNorm2d,use_sigmoid=False):
+        """Construct a PatchGAN discriminator
+
+        Parameters:
+            input_nc (int)  -- the number of channels in input images
+            ndf (int)       -- the number of filters in the last conv layer
+            n_layers (int)  -- the number of conv layers in the discriminator
+            norm_layer      -- normalization layer
+        """
+        super(pix2pixDiscriminator, self).__init__()
+        if type(norm_layer) == functools.partial:  # no need to use bias as BatchNorm2d has affine parameters
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        kw = 4
+        padw = 1
+
+        ndf = opt.ndf
+        if input_nc is None:
+            input_nc = self.compute_D_input_nc(opt)
+
+        sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers):  # gradually increase the number of filters
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** n, 8)
+            sequence += [
+                nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw, bias=use_bias),
+                norm_layer(ndf * nf_mult),
+                nn.LeakyReLU(0.2, True)
+            ]
+
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** n_layers, 8)
+        sequence += [
+            nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+            norm_layer(ndf * nf_mult),
+            nn.LeakyReLU(0.2, True)
+        ]
+
+        sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
+        if use_sigmoid:
+            sequence += [nn.Sigmoid()]
+        self.model = nn.Sequential(*sequence)
+
+    def compute_D_input_nc(self, opt):
+        label_nc = opt.label_nc
+        input_nc = label_nc + opt.output_nc
+        if opt.contain_dontcare_label:
+            input_nc += 1
+        if not opt.no_instance:
+            input_nc += 1
+        if not opt.no_inpaint:
+            input_nc += 1
+            
+        return input_nc
+
+    def forward(self, input):
+        """Standard forward."""
+        return self.model(input)

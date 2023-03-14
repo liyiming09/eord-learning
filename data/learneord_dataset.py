@@ -96,7 +96,7 @@ class SegmentationDataset(BaseDataset):
         self.root = opt.dataroot
         self.class_of_interest = [] # will define it in child
 
-        if (opt.dataset_mode == 'ade20kbox'):
+        if ('ade' in self.opt.dataset_mode):
             if opt.isTrain:
                 opt.prob_bg = 0.1
             opt.label_nc = 49 
@@ -104,6 +104,13 @@ class SegmentationDataset(BaseDataset):
             opt.load_image = True
             opt.min_box_size = 64 
         
+        if ('faca' in self.opt.dataset_mode):
+            if opt.isTrain:
+                opt.prob_bg = 0
+            opt.label_nc = 12 
+            opt.semantic_nc = 12 
+            opt.load_image = True
+            opt.min_box_size = 128 
 
         # ONLY TESTING: 
         if not opt.isTrain:
@@ -239,8 +246,11 @@ class SegmentationDataset(BaseDataset):
             option = 'erode'
         else:
             option = 'dilate'
-        kernel_size_threshold = 5
-        kernel_size_ceil = 61
+        # kernel_size_threshold = 5
+        # kernel_size_ceil = 61  if  'city' in self.opt.dataset_mode else 25
+        kernel_size_threshold = 5 if  'ade' in self.opt.dataset_mode  else 5
+        kernel_size_neg_threshold = 10 if  'ade' in self.opt.dataset_mode  else 15
+        kernel_size_ceil = 25 if  'ade' in self.opt.dataset_mode  else 61
         if positive:
             # positive instance
             kernel_size = random.randint(2, kernel_size_threshold)//2  *2 + 1
@@ -264,7 +274,7 @@ class SegmentationDataset(BaseDataset):
                 # print(kernel_size_tb,kernel_size_db,kernel_size)
                 mask_object_inst_ed = tensor_erode(mask_object_inst.unsqueeze(0),ksize=kernel_size).squeeze(0)
             else:
-                kernel_size = random.randint(kernel_size_threshold + 2, kernel_size_ceil)//2 * 2 + 1
+                kernel_size = random.randint(kernel_size_neg_threshold, kernel_size_ceil)//2 * 2 + 1
                 mask_object_inst_ed = tensor_dilate(mask_object_inst.unsqueeze(0),ksize=kernel_size).squeeze(0)
         # if dist.get_rank() == 0:
         #     print('bbox_inst_id:', params['bbox_inst_id'])
@@ -325,12 +335,15 @@ class SegmentationDataset(BaseDataset):
                     new_insts.append(new_inst)
                     new_labels.append(new_label)
                 outputs['ped_inst'], outputs['ped_label'] = new_insts, new_labels
+                # print(new_insts[0].dtype,new_labels[0].dtype )  #float32
+                # print(outputs['inst'].shape,outputs['label'].shape,new_insts[0].shape ,"00000" )
                 # print(len(outputs['ned_inst']),len(outputs['ped_inst']))
             else:
-                zeromap = torch.zeros_like(outputs['label'])
-                zeromap_inst = torch.zeros_like(outputs['label'], dtype=torch.long)
-                outputs['ped_inst'], outputs['ped_label'] = [outputs['inst']], [outputs['label']]
-                # print(outputs['inst'].dtype,outputs['label'].dtype,zeromap.dtype  )
+                zeromap = torch.zeros_like(outputs['label'], dtype=torch.float32)
+                zeromap_inst = torch.zeros_like(outputs['label'], dtype=torch.float32)
+                outputs['ped_inst'], outputs['ped_label'] = [outputs['inst'].float()], [outputs['label']]
+                # print(outputs['inst'].dtype,outputs['label'].dtype,zeromap.dtype  )   #rch.int32 torch.float32 torch.int64
+
                 outputs['ned_inst'], outputs['ned_label'] = [zeromap_inst ], [zeromap]
                 # print(len(outputs['ned_inst']),len(outputs['ped_inst']),000)
                 

@@ -7,7 +7,7 @@ import importlib
 import torch.utils.data
 from data.base_dataset import BaseDataset
 from data.basebox_dataset import BaseDataset as BaseNipsDataset
-
+from data.baseconfounder_dataset import BaseDataset as BaseConfDataset
 
 def find_dataset_using_name(dataset_name):
     # Given the option --dataset [datasetname],
@@ -23,7 +23,7 @@ def find_dataset_using_name(dataset_name):
     target_dataset_name = dataset_name.replace('_', '') + 'dataset'
     for name, cls in datasetlib.__dict__.items():
         if name.lower() == target_dataset_name.lower() \
-           and (issubclass(cls, BaseDataset) or issubclass(cls, BaseNipsDataset)):
+           and (issubclass(cls, BaseDataset) or issubclass(cls, BaseNipsDataset) or issubclass(cls, BaseConfDataset)):
             dataset = cls
             
     if dataset is None:
@@ -56,8 +56,23 @@ def create_dataloader(opt, instance):
     dataloader = torch.utils.data.DataLoader(
         instance,
         batch_size=opt.batchSize//len(opt.gpu_ids),
-        shuffle=not opt.serial_batches,
+        shuffle=False,
         sampler=train_sampler,
+        num_workers=int(opt.nThreads),
+        drop_last=opt.isTrain
+    )
+    return dataloader
+
+def create_dataloader_noddp(opt, instance):
+     #新增1：使用DistributedSampler，DDP帮我们把细节都封装起来了。用，就完事儿！
+    #       sampler的原理，后面也会介绍。
+    # train_sampler = torch.utils.data.distributed.DistributedSampler(instance)
+    # 需要注意的是，这里的batch_size指的是每个进程下的batch_size。也就是说，总batch_size是这里的batch_size再乘以并行数(world_size)。
+    dataloader = torch.utils.data.DataLoader(
+        instance,
+        batch_size=opt.batchSize,
+        shuffle=False,
+        # sampler=train_sampler,
         num_workers=int(opt.nThreads),
         drop_last=opt.isTrain
     )

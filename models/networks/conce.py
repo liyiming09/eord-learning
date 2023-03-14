@@ -1,9 +1,9 @@
 from packaging import version
 import torch
 from torch import nn
-import math
-from .sinkhorn import OT
-
+import math, random
+from .sinkhorn import OT, intervOT
+import torch.nn.functional as F
 class Normalize(nn.Module):
 
     def __init__(self, power=2):
@@ -28,27 +28,28 @@ class CoNCELoss(nn.Module):
         dim = feat_q.shape[1]
         # Therefore, we will include the negatives from the entire minibatch.
         # if self.opt.nce_includes_all_negatives_from_minibatch:
-        #     batch_dim_for_bmm = 1
+        batch_dim_for_bmm = 1
         # else:
-        if self.opt.divco:
-            batch_dim_for_bmm = self.opt.batchSize // len(self.opt.gpu_ids) * (self.opt.num_negative + 2)
-        else:
-            batch_dim_for_bmm = self.opt.batchSize // len(self.opt.gpu_ids)
+        # if self.opt.divco:
+        #     batch_dim_for_bmm = self.opt.batchSize // len(self.opt.gpu_ids) * (self.opt.num_negative + 2)
+        # else:
+        #     batch_dim_for_bmm = self.opt.batchSize // len(self.opt.gpu_ids)
 
         # print('feat_q', feat_q.shape)
-        ot_q = feat_q.view(batch_dim_for_bmm, -1, dim)
-        ot_k = feat_k.view(batch_dim_for_bmm, -1, dim).detach()
-        # pos_weight = torch.bmm(feat_c.view(batchSize, 1, -1), feat_k.view(batchSize, -1, 1))
-        # pos_weight = pos_weight.view(batchSize, 1)
-        # print(i,'ot:',  ot_q.shape,ot_k.shape)
-        # ot_q = torch.randn(1, 256, 10)
-        # ot_k = torch.randn(1, 256, 10)
-        # ot_q = torch.tensor([[[0.6, 0.8],[0.3, 0.95]]])
-        # ot_k = torch.tensor([[[0.3, 0.95],[0.6, 0.8]]])
+        if i >= 0:
+            ot_q = feat_q.view(batch_dim_for_bmm, -1, dim)
+            ot_k = feat_k.view(batch_dim_for_bmm, -1, dim).detach()
+            # pos_weight = torch.bmm(feat_c.view(batchSize, 1, -1), feat_k.view(batchSize, -1, 1))
+            # pos_weight = pos_weight.view(batchSize, 1)
+            # print(i,'ot:',  ot_q.shape,ot_k.shape)
+            # ot_q = torch.randn(1, 256, 10)
+            # ot_k = torch.randn(1, 256, 10)
+            # ot_q = torch.tensor([[[0.6, 0.8],[0.3, 0.95]]])
+            # ot_k = torch.tensor([[[0.3, 0.95],[0.6, 0.8]]])
 
-        f = OT(ot_q, ot_k, eps=1.0, max_iter=50, cost_type = self.opt.cost_type)
-        f = f.permute(0, 2, 1) * self.opt.ot_weight + 1e-8
-        f_max = torch.max(f, -1)[0].view(batchSize, 1)
+            f = OT(ot_q, ot_k, eps=1.0, max_iter=50, cost_type = self.opt.cost_type)
+            f = f.permute(0, 2, 1) * self.opt.ot_weight + 1e-8
+            f_max = torch.max(f, -1)[0].view(batchSize, 1)
         # f_tmp = f[0, 0, 1:]
         # print('*****', f_tmp.min(), f_tmp.max()) # tensor(0.3630) tensor(0.6370)
         # print('*****', f[0, 10, 10], f[0, 9:12, 9:12])
@@ -58,7 +59,7 @@ class CoNCELoss(nn.Module):
         # pos logit
         l_pos = torch.bmm(feat_q.view(batchSize, 1, -1), feat_k.view(batchSize, -1, 1))
         # print(i,'pos:',l_pos.shape, 'f_max',f_max.shape)
-        if i == 4:
+        if i >= 0:
             l_pos = l_pos.view(batchSize, 1) + torch.log(f_max) * 0.07
         else:
             l_pos = l_pos.view(batchSize, 1)
@@ -68,7 +69,7 @@ class CoNCELoss(nn.Module):
         feat_k = feat_k.view(batch_dim_for_bmm, -1, dim)
         npatches = feat_q.size(1)
         l_neg_curbatch = torch.bmm(feat_q, feat_k.transpose(2, 1))
-        if i == 4:
+        if i >= 0:
             l_neg_curbatch = l_neg_curbatch + torch.log(f) * 0.07
         # print(i, 'feat_q.feat_k', feat_q.shape, feat_k.shape)
         # diagonal entries are similarity between same features, and hence meaningless.
@@ -140,3 +141,544 @@ class PatchNCELoss(nn.Module):
                                                         device=feat_q.device)).mean()
 
         return loss
+
+class MaskCoNCELoss(nn.Module):
+    def __init__(self, opt, OT = True):
+        super().__init__()
+        #除对应位置之外，再根据干预区域mask（比较合理的设置，三个map的并集），重新划分正负例
+        #根据conce的sinkhorn矩阵，算出正例的prototype，村起来
+        #根据正例的prototype，找到当前query中最能代表proto的那个patch，然后根据这个正例的conce矩阵，给定负例对应的权重，加权求和算出负例的prototype
+        #对正负例进行约束
+        self.opt = opt
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
+        self.bce_loss = torch.nn.BCEWithLogitsLoss()
+        self.mask_dtype = torch.uint8 if version.parse(torch.__version__) < version.parse('1.2.0') else torch.bool
+        self.l2_norm = Normalize(2)
+        self.batch_dim_for_bmm = 1
+        self.ot = OT
+        self.neg_type = opt.negtype
+    def select_granteen(self, Q, K, num_of_proto):
+        
+        similarity = torch.bmm(Q, K.transpose(2, 1))## B, Sample_num,  dim X B,  dim, Sample_num  --> B, Sample_num, Sample_num,
+        attn = similarity.softmax(dim=2)
+        prob = -torch.log(attn)
+        prob = torch.where(torch.isinf(prob), torch.full_like(prob, 0), prob) #  B, Sample_num, Sample_num,
+        attn = similarity.softmax(dim=2)
+        entropy = torch.sum(torch.mul(attn, prob), dim=2)  # 计算得出熵，以熵作为信息量的评判标准，越低的就越代表有效的表征  -->  B, Sample_num
+        _, index = torch.sort(entropy)
+        patch_id = index[:, :num_of_proto] # 取前N个作为计算原型用的候选patch
+
+        return entropy, patch_id
+
+    def cal_prototype(self, feat_q, feat_k, mode = None):
+        num_patches = feat_q.shape[1]
+        num_of_proto = num_patches//2
+
+        #对于绝对正确的正阳本patch，有两种思路：q与q算，k与k算；；另一种，q与k算，相似对最高的q才有资格成为proto
+        if mode == 'bg':
+            # 思路2： q和k算，纯按照相似度来算，够高才有资格成为正样本
+            entropy, patch_id = self.select_granteen(feat_q, feat_k, num_of_proto)
+        else:
+        # 思路1：自己跟自己算，但是分为有GT指引的patch相似度评价，和面向生成结果的相似度评价，两种思路
+            entropy, patch_id = self.select_granteen(feat_q, feat_q, num_of_proto)
+        
+        entropy_k, patch_id_k = self.select_granteen(feat_k, feat_k, num_of_proto)
+
+        
+
+        q_proto_gran_src = feat_q[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id, :]
+        q_weight = entropy[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id].softmax(dim=1).unsqueeze(2)
+
+        q_proto_gran = torch.mul(q_weight, q_proto_gran_src)
+        q_proto = torch.sum(q_proto_gran, dim=1)
+
+
+        k_proto_gran_src = feat_k[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id, :]
+        k_weight = entropy_k[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id].softmax(dim=1).unsqueeze(2)
+        k_proto_gran = torch.mul(k_weight, k_proto_gran_src)
+        k_proto = torch.sum(k_proto_gran, dim=1)
+
+        return q_proto, k_proto, q_proto_gran, k_proto_gran
+    
+    def get_nce_loss(self, feat_q, feat_k):
+        
+
+        # feat_q = feat_q.view(self.batch_dim_for_bmm, -1, dim)  ## B, Sample_num,  dim 
+        # feat_k = feat_k.view(self.batch_dim_for_bmm, -1, dim)
+        npatches = feat_q.size(1)
+        l_neg_curbatch = torch.bmm(feat_q, feat_k.transpose(2, 1))## B, Sample_num,  dim X B,  dim, Sample_num  --> B, Sample_num, Sample_num,
+
+        # diagonal entries are similarity between same features, and hence meaningless.
+        # just fill the diagonal with very small number, which is exp(-10) and almost zero
+        diagonal = torch.eye(npatches, device=feat_q.device, dtype=self.mask_dtype)[None, :, :]  #仅对角线为1的EYE矩阵
+        l_neg_curbatch.masked_fill_(diagonal, -10.0)  #B, Sample_num, Sample_num
+
+        num_patches = feat_q.shape[1]
+        l_pos = torch.bmm(feat_q.view(num_patches, 1, -1), feat_k.view(num_patches, -1, 1))  # B*Sample_num, 1, dim   x  B*Sample_num,dim,1  --> B*Sample_num,1 (B*Sample_num:整个MINIBATCH内采样总数量)
+        l_pos = l_pos.view(num_patches, 1)
+
+        l_neg = l_neg_curbatch.view(-1, npatches) #B * Sample_num, Sample_num
+
+        out = torch.cat((l_pos, l_neg), dim=1) / 0.07
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long,device=feat_q.device)).mean()
+
+        return loss
+    
+    def get_contrastive_loss(self, feat_q, feat_k):
+        out = torch.mm(feat_q, feat_k.transpose(1,0)) / self.opt.tau
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long, device=feat_q.device))
+        # print(out.dtype)
+        return loss
+
+    def get_cos_loss(self, x, y):
+        x = torch.nn.functional.normalize(x, dim=-1, p=2)
+        y = torch.nn.functional.normalize(y, dim=-1, p=2)
+        cos = 1 - torch.nn.functional.cosine_similarity(x,y,dim=-1)
+        return cos.mean()
+
+    def forward(self, feat_qs, feat_ks, i):
+        # q: fake images k: gt
+        feat_q, feat_k = feat_qs[0], feat_ks[0]
+        feat_q_neg, feat_k_neg = feat_qs[1], feat_ks[1]
+        feat_q_bg, feat_k_bg = feat_qs[2], feat_ks[2]
+        num_patches = feat_q.shape[0]
+        num_patches_bg = feat_q_neg.shape[0]
+        dim = feat_q.shape[1]
+        # Therefore, we will include the negatives from the entire minibatch.
+        # if self.opt.nce_includes_all_negatives_from_minibatch:
+        #     batch_dim_for_bmm = 1
+        # else:
+
+        # if num_patches % 2 != 0:
+        #     print(i, feat_q.shape)
+        # if self.opt.divco:
+        #     batch_dim_for_bmm = self.opt.batchSize // len(self.opt.gpu_ids) * (self.opt.num_negative + 2)
+        # else:
+        #只能取1,因为对instance进行干预后。每一个实例的mask都不一样，minibatch内的patch数量不一致
+
+        # print('feat_q', feat_q.shape)
+        feat_q = feat_q.view(self.batch_dim_for_bmm, -1, dim)  ## B, Sample_num,  dim 
+        feat_k = feat_k.view(self.batch_dim_for_bmm, -1, dim)
+        feat_q_neg = feat_q_neg.view(self.batch_dim_for_bmm, -1, dim)  ## B, Sample_num,  dim 
+        feat_k_neg = feat_k_neg.view(self.batch_dim_for_bmm, -1, dim)
+        feat_q_bg = feat_q_bg.view(self.batch_dim_for_bmm, -1, dim)  ## B, Sample_num,  dim 
+        feat_k_bg = feat_k_bg.view(self.batch_dim_for_bmm, -1, dim)
+        npatches = feat_q.size(1)
+        
+        q_pos_proto, k_pos_proto, q_pos_proto_gran, k_pos_proto_gran = self.cal_prototype(feat_q, feat_k)
+        
+        q_bg_proto, k_bg_proto, q_bg_proto_gran, k_bg_proto_gran = self.cal_prototype(feat_q_bg, feat_k_bg, mode = 'bg')
+
+
+        loss = 0
+        if q_pos_proto_gran.shape[1] >0 :
+            loss += self.get_cos_loss( q_pos_proto_gran, k_pos_proto_gran)
+        
+        if q_bg_proto_gran.shape[1] >0 :
+            loss += self.get_nce_loss( q_bg_proto_gran, k_bg_proto_gran)
+
+        if (not self.opt.part_nce) or i > 1:
+            
+
+
+            if feat_q_neg.shape[1]  != 0:
+                if self.ot:
+                    if self.neg_type == 'frompos' or  feat_q_bg.shape[1]  == 0 :
+                    #思路1：根据正例的prototype，找到当前query中最能代表proto的那个patch，然后根据这个正例的conce矩阵，给定负例对应的权重，加权求和算出负例的prototype
+                        ot_q = feat_q.view(self.batch_dim_for_bmm, -1, dim)
+                        ot_k = feat_q_neg.view(self.batch_dim_for_bmm, -1, dim)
+                        similarity_sinkhorn = intervOT(ot_k, ot_q, eps=1.0, max_iter=50, cost_type = self.opt.cost_type)
+
+                        proto_simil = torch.bmm(q_pos_proto.view(self.batch_dim_for_bmm, -1, dim), feat_q.transpose(2, 1)) ## B, 1,  dim X B,  dim, Sample_num  --> B, 1, Sample_num,
+                        _, index_p = torch.max(proto_simil, 2)
+
+                        neg_weight = similarity_sinkhorn[torch.arange(self.batch_dim_for_bmm)[:, None], index_p, :].transpose(2, 1)
+                        q_neg_proto_gran = torch.mul(neg_weight, feat_q_neg)
+                        k_neg_proto_gran =  torch.mul(neg_weight, feat_k_neg)
+                        q_neg_proto = torch.sum(q_neg_proto_gran, dim=1)
+                        k_neg_proto = torch.sum(k_neg_proto_gran, dim=1)
+                    elif self.neg_type == 'frombg':
+                    #思路2：根据背景的prototype，找到当前query中最能代表proto的那个背景patch，然后根据这个背景与负例的conce矩阵，找到背景patch的那一列，给定负例对应的权重，加权求和算出负例的prototype
+                        ot_q = feat_q_bg.view(self.batch_dim_for_bmm, -1, dim)
+                        ot_k = feat_q_neg.view(self.batch_dim_for_bmm, -1, dim)
+                        similarity_sinkhorn = intervOT(ot_k, ot_q, eps=1.0, max_iter=50, cost_type = self.opt.cost_type)
+
+                        proto_simil = torch.bmm(q_bg_proto.view(self.batch_dim_for_bmm, -1, dim), feat_q_bg.transpose(2, 1)) ## B, 1,  dim X B,  dim, Sample_num  --> B, 1, bg_num,
+                        _, index_p = torch.max(proto_simil, 2)
+
+                        neg_weight = similarity_sinkhorn[torch.arange(self.batch_dim_for_bmm)[:, None], index_p, :].transpose(2, 1)
+                        q_neg_proto_gran = torch.mul(neg_weight, feat_q_neg)
+                        k_neg_proto_gran =  torch.mul(neg_weight, feat_k_neg)
+                        q_neg_proto = torch.sum(q_neg_proto_gran, dim=1)
+                        k_neg_proto = torch.sum(k_neg_proto_gran, dim=1)
+                    else:
+                    #思路3：根据prototype，直接计算相似度并加权 
+                        proto_simil = torch.bmm(q_bg_proto.view(self.batch_dim_for_bmm, -1, dim), feat_q_neg.transpose(2, 1)) 
+                        _, index = torch.sort(proto_simil)
+
+                        patch_id = index[:, :feat_q_neg.shape[1]] # 取前N个作为计算原型用的候选patch
+
+                        q_neg_proto_gran = feat_q_neg[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id, :]
+                        q_weight = proto_simil[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id].softmax(dim=1).unsqueeze(2)
+                        q_neg_proto = torch.sum(torch.mul(q_weight, q_neg_proto_gran), dim=1)
+
+                        k_neg_proto_gran = feat_k[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id, :]
+                        # k_weight = entropy_k[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id].softmax(dim=1).unsqueeze(2)
+                        k_neg_proto = torch.sum(torch.mul(q_weight, k_neg_proto_gran), dim=1)
+
+
+                else:
+                    q_neg_proto, k_neg_proto, q_neg_proto_gran, k_neg_proto_gran = self.cal_prototype(feat_q_neg, feat_k_neg)
+                
+
+                loss += self.get_nce_loss( q_neg_proto_gran, k_neg_proto_gran)
+                final_q = torch.cat((q_pos_proto, q_neg_proto, q_bg_proto), 0).unsqueeze(0)
+                final_k = torch.cat((k_pos_proto, k_neg_proto, k_bg_proto), 0).unsqueeze(0)
+            else:
+                final_q = torch.cat((q_pos_proto, q_bg_proto), 0).unsqueeze(0)
+                final_k = torch.cat((k_pos_proto, k_bg_proto), 0).unsqueeze(0)
+            loss += self.get_nce_loss(final_q, final_k)
+            # loss += self.get_cos_loss(q_neg_proto, q_pos_proto)
+
+
+
+        # ot_q = feat_q.view(self.batch_dim_for_bmm, -1, dim)
+        # ot_k = feat_k.view(self.batch_dim_for_bmm, -1, dim).detach()
+
+        # f = intervOT(ot_q, ot_k, eps=1.0, max_iter=50, cost_type = self.opt.cost_type)
+        
+        # loss = loss_pos + loss_neg  + loss_bg
+
+        # feat_k = feat_k.detach()
+        # feat_k_neg = feat_k_neg.detach()
+        # # pos logit
+        # l_pos = torch.bmm(feat_q_neg.view(num_patches_bg, 1, -1), feat_k_neg.view(num_patches_bg, -1, 1))
+        # # print(i,'pos:',l_pos.shape, 'f_max',f_max.shape)
+        # # if i == 3:
+        # #     l_pos = l_pos.view(num_patches, 1) + torch.log(f_max) * 0.07
+        # # else:
+        # l_pos = l_pos.view(num_patches_bg, 1)
+
+        # # reshape features to batch size
+        
+
+        # feat_q = feat_q.view(self.batch_dim_for_bmm, -1, dim)
+        # feat_k = feat_k.view(self.batch_dim_for_bmm, -1, dim)
+        # npatches = feat_q.size(1)
+        # l_neg_curbatch = torch.bmm(feat_q, feat_k.transpose(2, 1))
+
+        # # print(i, 'feat_q.feat_k', feat_q.shape, feat_k.shape)
+        # # diagonal entries are similarity between same features, and hence meaningless.
+        # # just fill the diagonal with very small number, which is exp(-10) and almost zero
+        # diagonal = torch.eye(npatches, device=feat_q.device, dtype=self.mask_dtype)[None, :, :]
+        # l_neg_curbatch.masked_fill_(diagonal, -10.0)
+        # l_neg = l_neg_curbatch.view(-1, npatches)/ 0.07
+        # # print(i,'neg:',l_neg.shape, 'diagonal',diagonal.shape)
+
+        # # out = torch.cat((l_pos, l_neg), dim=1) / 0.07
+        # # print(i,'out:',out.shape)
+        # loss = self.cross_entropy_loss(l_neg, torch.zeros(l_neg.size(0), dtype=torch.long, device=feat_q.device)).mean() \
+        #     + self.bce_loss(l_pos, torch.ones(l_pos.size(), dtype=torch.float, device=feat_q.device)).mean()
+
+        return loss
+
+
+class MaskCoNCELoss_queue(nn.Module):
+    def __init__(self, opt, OT = True):
+        super().__init__()
+        #除对应位置之外，再根据干预区域mask（比较合理的设置，三个map的并集），重新划分正负例
+        #根据conce的sinkhorn矩阵，算出正例的prototype，村起来
+        #根据正例的prototype，找到当前query中最能代表proto的那个patch，然后根据这个正例的conce矩阵，给定负例对应的权重，加权求和算出负例的prototype
+        #对正负例进行约束
+        self.opt = opt
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
+        self.bce_loss = torch.nn.BCEWithLogitsLoss()
+        self.mask_dtype = torch.uint8 if version.parse(torch.__version__) < version.parse('1.2.0') else torch.bool
+        self.l2_norm = Normalize(2)
+        self.batch_dim_for_bmm = 1
+        self.ot = OT
+        self.neg_type = opt.negtype
+        self.T = 0.07
+        if 'ade' in self.opt.dataset_mode:
+            self.cls_ids = [2, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, \
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 32, \
+            33, 35, 36, 37, 38]
+        else:
+            self.cls_ids = [24, 25, 26, 27, 28, 29, 30, 31, 32, 33] 
+    def select_granteen(self, Q, K, num_of_proto):
+        
+        similarity = torch.bmm(Q, K.transpose(2, 1))## B, Sample_num,  dim X B,  dim, Sample_num  --> B, Sample_num, Sample_num,
+        attn = similarity.softmax(dim=2)
+        prob = -torch.log(attn)
+        prob = torch.where(torch.isinf(prob), torch.full_like(prob, 0), prob) #  B, Sample_num, Sample_num,
+        attn = similarity.softmax(dim=2)
+        entropy = torch.sum(torch.mul(attn, prob), dim=2)  # 计算得出熵，以熵作为信息量的评判标准，越低的就越代表有效的表征  -->  B, Sample_num
+        _, index = torch.sort(entropy)
+        patch_id = index[:, :num_of_proto] # 取前N个作为计算原型用的候选patch
+
+        return entropy, patch_id
+
+    def cal_prototype(self, feat_q, feat_k, mode = None):
+        num_patches = feat_q.shape[1]
+        num_of_proto = num_patches//2
+
+        #对于绝对正确的正阳本patch，有两种思路：q与q算，k与k算；；另一种，q与k算，相似对最高的q才有资格成为proto
+        if mode == 'bg':
+            # 思路2： q和k算，纯按照相似度来算，够高才有资格成为正样本
+            entropy, patch_id = self.select_granteen(feat_q, feat_k, num_of_proto)
+        else:
+        # 思路1：自己跟自己算，但是分为有GT指引的patch相似度评价，和面向生成结果的相似度评价，两种思路
+            entropy, patch_id = self.select_granteen(feat_q, feat_q, num_of_proto)
+        
+        entropy_k, patch_id_k = self.select_granteen(feat_k, feat_k, num_of_proto)
+
+        
+        entropy=1-entropy
+        q_proto_gran_src = feat_q[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id, :]
+        q_weight = entropy[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id].softmax(dim=1).unsqueeze(2)  #1, nums, 1
+
+        q_proto_gran = torch.mul(q_weight, q_proto_gran_src)
+        q_proto = torch.sum(q_proto_gran, dim=1)
+
+
+        k_proto_gran_src = feat_k[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id, :]
+        k_weight = entropy_k[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id].softmax(dim=1).unsqueeze(2)
+        k_proto_gran = torch.mul(k_weight, k_proto_gran_src)
+        k_proto = torch.sum(k_proto_gran, dim=1)
+
+        if num_of_proto > 0:
+            norm_weight = q_weight/q_weight.max()
+        else:
+            norm_weight = None
+        return q_proto, k_proto, q_proto_gran_src,  k_proto_gran_src, norm_weight
+    
+    def get_nce_loss(self, feat_q, feat_k, q_weight = None):
+        
+
+        # feat_q = feat_q.view(self.batch_dim_for_bmm, -1, dim)  ## B, Sample_num,  dim 
+        # feat_k = feat_k.view(self.batch_dim_for_bmm, -1, dim)
+        npatches = feat_q.size(1)
+        l_neg_curbatch = torch.bmm(feat_q, feat_k.transpose(2, 1))## B, Sample_num,  dim X B,  dim, Sample_num  --> B, Sample_num, Sample_num,
+
+        # diagonal entries are similarity between same features, and hence meaningless.
+        # just fill the diagonal with very small number, which is exp(-10) and almost zero
+        diagonal = torch.eye(npatches, device=feat_q.device, dtype=self.mask_dtype)[None, :, :]  #仅对角线为1的EYE矩阵
+        l_neg_curbatch.masked_fill_(diagonal, -10.0)  #B, Sample_num, Sample_num
+
+        num_patches = feat_q.shape[1]
+        l_pos = torch.bmm(feat_q.view(num_patches, 1, -1), feat_k.view(num_patches, -1, 1))  # B*Sample_num, 1, dim   x  B*Sample_num,dim,1  --> B*Sample_num,1 (B*Sample_num:整个MINIBATCH内采样总数量)
+        l_pos = l_pos.view(num_patches, 1)
+
+        if q_weight == None or self.opt.no_select:
+            l_neg = l_neg_curbatch.view(-1, npatches) #B * Sample_num, Sample_num
+        else:
+            l_neg = l_neg_curbatch.view(-1, npatches) + torch.log(q_weight.squeeze(0) + 1e-8) * 0.07
+
+        out = torch.cat((l_pos, l_neg), dim=1) / 0.07
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long,device=feat_q.device)).mean()
+
+        return loss
+    
+    def get_contrastive_loss(self, feat_q, feat_k):
+        out = torch.mm(feat_q, feat_k.transpose(1,0)) / self.opt.tau
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long, device=feat_q.device))
+        # print(out.dtype)
+        return loss
+
+    def get_cos_loss(self, x, y):
+        x = torch.nn.functional.normalize(x, dim=-1, p=2)
+        y = torch.nn.functional.normalize(y, dim=-1, p=2)
+        cos = 1 - torch.nn.functional.cosine_similarity(x,y,dim=-1)
+        return cos.mean()
+
+    def get_moco_loss(self, q, k, queue):
+
+        # compute logits
+        # Einstein sum is more intuitive
+        # positive logits: Nx1
+        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+        # negative logits: NxK
+        l_neg = torch.einsum('nc,ck->nk', [q, queue.clone().detach()])
+
+        # logits: Nx(1+K)
+        logits = torch.cat([l_pos, l_neg], dim=1)
+
+        # apply temperature
+        logits /= self.T
+
+        # labels: positive key indicators
+        labels = torch.zeros(logits.shape[0], dtype=torch.long,  device=q.device)
+
+
+        loss = self.cross_entropy_loss(logits, labels).mean()
+
+        return loss
+    
+    def distance(self, q, k):
+
+        output = torch.pow(q - k, 2.0).mean()
+        return output
+
+
+    def get_pos_que_loss(self, q, k, queue):
+            
+        que_center = queue.clone().detach().mean(dim=1).unsqueeze(0)
+
+
+        loss = self.distance(q, k) + self.distance(q, que_center)
+
+        return loss
+    
+    def get_pos_nce_loss(self, feat_q, feat_k, q_weight = None):
+
+
+        similarity = 1 - torch.bmm(feat_q, feat_k.transpose(2, 1))## B, Sample_num,  dim X B,  dim, Sample_num  --> B, Sample_num, Sample_num,
+        loss = similarity.mean()
+
+        return loss
+
+    def forward(self, feat_qs, feat_ks, i, cur_cls, queue):
+        # q: fake images k: gt
+        feat_q, feat_k = feat_qs[0], feat_ks[0]
+        feat_q_neg, feat_k_neg = feat_qs[1], feat_ks[1]
+        feat_q_bg, feat_k_bg = feat_qs[2], feat_ks[2]
+        num_patches = feat_q.shape[0]
+        num_patches_bg = feat_q_neg.shape[0]
+        dim = feat_q.shape[1]
+        # Therefore, we will include the negatives from the entire minibatch.
+        # if self.opt.nce_includes_all_negatives_from_minibatch:
+        #     batch_dim_for_bmm = 1
+        # else:
+
+        # if num_patches % 2 != 0:
+        #     print(i, feat_q.shape)
+        # if self.opt.divco:
+        #     batch_dim_for_bmm = self.opt.batchSize // len(self.opt.gpu_ids) * (self.opt.num_negative + 2)
+        # else:
+        #只能取1,因为对instance进行干预后。每一个实例的mask都不一样，minibatch内的patch数量不一致
+
+        # print('feat_q', feat_q.shape)
+        feat_q = feat_q.view(self.batch_dim_for_bmm, -1, dim)  ## B, Sample_num,  dim 
+        feat_k = feat_k.view(self.batch_dim_for_bmm, -1, dim)
+        feat_q_neg = feat_q_neg.view(self.batch_dim_for_bmm, -1, dim)  ## B, Sample_num,  dim 
+        feat_k_neg = feat_k_neg.view(self.batch_dim_for_bmm, -1, dim)
+        feat_q_bg = feat_q_bg.view(self.batch_dim_for_bmm, -1, dim)  ## B, Sample_num,  dim 
+        feat_k_bg = feat_k_bg.view(self.batch_dim_for_bmm, -1, dim)
+        npatches = feat_q.size(1)
+        
+        q_pos_proto, k_pos_proto, q_pos_proto_gran, k_pos_proto_gran, pos_weight = self.cal_prototype(feat_q, feat_k)
+        
+        q_bg_proto, k_bg_proto, q_bg_proto_gran, k_bg_proto_gran, bg_weight = self.cal_prototype(feat_q_bg, feat_k_bg, mode = 'bg')
+
+
+        loss = 0
+        
+        
+        if not self.opt.no_select:
+            if q_pos_proto_gran.shape[1] >0 :
+                if not self.opt.no_negk:
+                    loss += self.get_cos_loss( q_pos_proto_gran, k_pos_proto_gran)
+                else:
+                    loss += self.get_pos_nce_loss(q_pos_proto_gran, k_pos_proto_gran, pos_weight)
+            
+            if q_bg_proto_gran.shape[1] >0 :
+                loss += self.get_nce_loss( q_bg_proto_gran, k_bg_proto_gran, bg_weight)
+
+
+            if feat_q_neg.shape[1]  != 0:
+                if self.ot:
+                    if self.neg_type == 'frompos':
+                    #思路1：根据正例的prototype，找到当前query中最能代表proto的那个patch，然后根据这个正例的conce矩阵，给定负例对应的权重，加权求和算出负例的prototype
+                        ot_q = feat_q.view(self.batch_dim_for_bmm, -1, dim)
+                        ot_k = feat_q_neg.view(self.batch_dim_for_bmm, -1, dim)
+                        if not self.opt.no_ot:
+                            similarity_sinkhorn = intervOT(ot_k, ot_q, eps=1.0, max_iter=50, cost_type = self.opt.cost_type)
+                        else:
+                            similarity_sinkhorn = torch.einsum('bid,bod->bio', ot_k, ot_q).transpose(2, 1).softmax(dim=2)
+
+                        proto_simil = torch.bmm(q_pos_proto.view(self.batch_dim_for_bmm, -1, dim), feat_q.transpose(2, 1)) ## B, 1,  dim X B,  dim, Sample_num  --> B, 1, Sample_num,
+                        _, index_p = torch.max(proto_simil, 2)
+
+                        neg_weight = similarity_sinkhorn[torch.arange(self.batch_dim_for_bmm)[:, None], index_p, :].transpose(2, 1)
+                        q_neg_proto_gran = torch.mul(neg_weight, feat_q_neg)
+                        k_neg_proto_gran =  torch.mul(neg_weight, feat_k_neg)
+                        q_neg_proto = torch.sum(q_neg_proto_gran, dim=1)
+                        k_neg_proto = torch.sum(k_neg_proto_gran, dim=1)
+                    elif self.neg_type == 'frombg' and feat_q_bg.shape[0] != 0:
+                    #思路2：根据背景的prototype，找到当前query中最能代表proto的那个背景patch，然后根据这个背景与负例的conce矩阵，找到背景patch的那一列，给定负例对应的权重，加权求和算出负例的prototype
+                        ot_q = feat_q_bg.view(self.batch_dim_for_bmm, -1, dim)
+                        ot_k = feat_q_neg.view(self.batch_dim_for_bmm, -1, dim)
+                        if not self.opt.no_ot:
+                            similarity_sinkhorn = intervOT(ot_k, ot_q, eps=1.0, max_iter=50, cost_type = self.opt.cost_type)
+                        else:
+                            similarity_sinkhorn = torch.einsum('bid,bod->bio', ot_k, ot_q).transpose(2, 1).softmax(dim=2)
+
+                        proto_simil = torch.bmm(q_bg_proto.view(self.batch_dim_for_bmm, -1, dim), feat_q_bg.transpose(2, 1)) ## B, 1,  dim X B,  dim, Sample_num  --> B, 1, bg_num,
+                        _, index_p = torch.max(proto_simil, 2)
+
+                        neg_weight = similarity_sinkhorn[torch.arange(self.batch_dim_for_bmm)[:, None], index_p, :].transpose(2, 1)
+                        q_neg_proto_gran = torch.mul(neg_weight, feat_q_neg)
+                        k_neg_proto_gran =  torch.mul(neg_weight, feat_k_neg)
+                        q_neg_proto = torch.sum(q_neg_proto_gran, dim=1)
+                        k_neg_proto = torch.sum(k_neg_proto_gran, dim=1)
+                    else:
+                    #思路3：根据prototype，直接计算相似度并加权 
+                        ot_q = q_pos_proto.view(self.batch_dim_for_bmm, -1, dim)
+                        ot_k = feat_q_neg.view(self.batch_dim_for_bmm, -1, dim)
+                        neg_weight = torch.einsum('bid,bod->bio', ot_k, ot_q).softmax(dim=1)  # 1 x neg_num x 1
+
+                        q_neg_proto_gran = torch.mul(neg_weight, feat_q_neg)
+                        k_neg_proto_gran =  torch.mul(neg_weight, feat_k_neg)
+                        q_neg_proto = torch.sum(q_neg_proto_gran, dim=1)
+                        k_neg_proto = torch.sum(k_neg_proto_gran, dim=1)
+                        # proto_simil = torch.bmm(q_bg_proto.view(self.batch_dim_for_bmm, -1, dim), feat_q_neg.transpose(2, 1)) 
+                        # _, index = torch.sort(proto_simil)
+
+                        # patch_id = index[:, :feat_q_neg.shape[1]] # 取前N个作为计算原型用的候选patch
+
+                        # q_neg_proto_gran = feat_q_neg[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id, :]
+                        # q_weight = proto_simil[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id].softmax(dim=1).unsqueeze(2)
+                        # q_neg_proto = torch.sum(torch.mul(q_weight, q_neg_proto_gran), dim=1)
+
+                        # k_neg_proto_gran = feat_k[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id, :]
+                        # # k_weight = entropy_k[torch.arange(self.batch_dim_for_bmm)[:, None], patch_id].softmax(dim=1).unsqueeze(2)
+                        # k_neg_proto = torch.sum(torch.mul(q_weight, k_neg_proto_gran), dim=1)
+
+
+                else:
+                    q_neg_proto, k_neg_proto, q_neg_proto_gran, k_neg_proto_gran = self.cal_prototype(feat_q_neg, feat_k_neg)
+                
+                neg_weight = neg_weight/neg_weight.max()
+                loss += self.get_nce_loss( feat_q_neg, feat_k_neg, neg_weight)
+                final_q = torch.cat((q_pos_proto, q_neg_proto, q_bg_proto), 0).unsqueeze(0)
+                final_k = torch.cat((k_pos_proto, k_neg_proto, k_bg_proto), 0).unsqueeze(0)
+                protos = [q_pos_proto, q_neg_proto, q_bg_proto]
+
+                if self.opt.use_queue:
+                    loss += self.get_moco_loss(q_neg_proto, k_neg_proto, queue[1, cur_cls[0], :,:])
+            else:
+                final_q = torch.cat((q_pos_proto, q_bg_proto), 0).unsqueeze(0)
+                final_k = torch.cat((k_pos_proto, k_bg_proto), 0).unsqueeze(0)
+                protos = [q_pos_proto, torch.ones_like(q_pos_proto,  device=q_pos_proto.device), q_bg_proto]
+            loss += self.get_nce_loss(final_q, final_k)
+
+            if self.opt.use_queue:
+                if self.opt.rand_pos_que:
+                    ran_cls = random.sample(self.cls_ids,1)[0]
+                    while cur_cls[0] == ran_cls :
+                        ran_cls = random.sample(self.cls_ids,1)[0]
+                    loss += self.get_moco_loss(q_pos_proto, k_pos_proto, queue[0, ran_cls, :,:])
+                else:
+                    loss += self.get_pos_que_loss(q_pos_proto, k_pos_proto, queue[0, cur_cls[0], :,:])
+                loss += self.get_moco_loss(q_bg_proto, k_bg_proto, queue[2, cur_cls[0], :,:])
+        else:
+            if feat_q_bg.shape[1] >0 :
+                loss += self.get_nce_loss( feat_q_bg, feat_k_bg)
+            if feat_q.shape[1] >0 :
+                loss += self.get_nce_loss( feat_q, feat_k)
+            if feat_q_neg.shape[1]  != 0:
+                loss += self.get_nce_loss( feat_q_neg, feat_k_neg)
+            return loss, None
+        return loss, protos
+
+

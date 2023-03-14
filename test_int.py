@@ -52,7 +52,7 @@ def main():
         if i * opt.batchSize >= opt.how_many:
             break
 
-        generated_seq, masked_image, semantics_seq, atts = model(data_i, mode='test')
+        generated_seq, masked_image, semantics_seq, atts = model(data_i, mode='attention')
 
         if masked_image.shape[1] != 3:
             masked_image = masked_image[:,:3]

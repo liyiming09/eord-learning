@@ -59,6 +59,8 @@ class BaseOptions():
         # for generator
         parser.add_argument('--netG', type=str, default='sesame', help='selects model to use for netG')
         parser.add_argument('--netE', type=str, default='attentionunet', help='selects model to use for netE')
+        parser.add_argument('--netC', type=str, default='resnet', help='selects model to use for netE')
+        parser.add_argument('--method', type=str, default='LRP', help='selects method to model explanation')
         parser.add_argument('--ngf', type=int, default=64, help='# of gen filters in first conv layer')
         parser.add_argument('--init_type', type=str, default='xavier', help='network initialization [normal|xavier|kaiming|orthogonal]')
         parser.add_argument('--init_variance', type=float, default=0.02, help='variance of the initialization distribution')
@@ -82,9 +84,13 @@ class BaseOptions():
         parser.add_argument('--effect', action='store_true', help='whether use effect to help attention')
         parser.add_argument('--fakeattention', action='store_true', help='whether use fakeattention during att-unet')
         parser.add_argument('--monce', action='store_true', help='whether use monce loss')
+        parser.add_argument('--masknce', action='store_true', help='whether use monce loss')
         parser.add_argument('--patchnce', action='store_true', help='whether use patchnce loss')
         parser.add_argument('--latenD', action='store_true', help='whether use latent feature Discriminator')
         parser.add_argument("--local_rank", default=-1, type=int)
+
+        parser.add_argument('--vae', action='store_true', help='use encoder to generate counterfactual images, if not, will obtain them in online traditional way.')
+
         # parser.set_defaults(preprocess_mode='fixed')
         # parser.set_defaults(load_size=512)
         # parser.set_defaults(loadSize=512)

@@ -12,15 +12,21 @@ from collections import OrderedDict
 import data
 from options.test_options import TestOptions
 from models.pix2pix_model import Pix2PixModel
+from models.attentioneffect_model import AttentionEffectModel
+from models.refineg_model import RefineGModel
+
 from models.learneord_model import LearnEordModel
 from util.visualizer import Visualizer
 from util import html
+import torch.distributed as dist
+
 
 import numpy as np
 from skimage.measure import compare_ssim
 from skimage.color import rgb2gray
 
 def main():
+    dist.init_process_group(backend='nccl')
     opt = TestOptions().parse()
     
     # dataloader = data.create_dataloader(opt)
@@ -29,7 +35,7 @@ def main():
 
      # create trainer for our model
     # trainer = Pix2PixTrainer(opt)
-    model = LearnEordModel(opt)
+    model = RefineGModel(opt)
     # load the dataloader
     dataloader = data.create_dataloader(opt, dataset)
 
@@ -52,7 +58,7 @@ def main():
         if i * opt.batchSize >= opt.how_many:
             break
 
-        generated, masked_image, semantics_seq = model(data_i, mode='inference')
+        generated, masked_image, semantics_seq = model(data_i, mode='inference_noeord')
 
         if masked_image.shape[1] != 3:
             masked_image = masked_image[:,:3]
@@ -96,18 +102,18 @@ def main():
                 visualizer.save_images(webpage, visuals, img_path[b:b + 1],i)
 
             # Compute SSIM on edited areas
-            pred_img = generated[0].detach().cpu().numpy().transpose(1,2,0)
-            gt_img = data_i['image'].float()[0].numpy().transpose(1,2,0)
-            pred_img = rgb2gray(pred_img)
-            # print(pred_img.max(),pred_img.mean(),pred_img.min())
-            gt_img = rgb2gray(gt_img)
-            ssim_pic = compare_ssim(gt_img,pred_img, multichannel=False, full=True)[1]
+            # pred_img = generated[0].detach().cpu().numpy().transpose(1,2,0)
+            # gt_img = data_i['image'].float()[0].numpy().transpose(1,2,0)
+            # pred_img = rgb2gray(pred_img)
+            # # print(pred_img.max(),pred_img.mean(),pred_img.min())
+            # gt_img = rgb2gray(gt_img)
+            # ssim_pic = compare_ssim(gt_img,pred_img, multichannel=False, full=True)[1]
 
-            mask = data_i['mask_in'][0]
-            ssim.append(np.ma.masked_where(1 - mask.cpu().numpy().squeeze(), ssim_pic).mean())
+            # mask = data_i['mask_in'][0]
+            # ssim.append(np.ma.masked_where(1 - mask.cpu().numpy().squeeze(), ssim_pic).mean())
 
     webpage.save()
-    print(np.mean(ssim))
+    # print(np.mean(ssim))
 
 if __name__ == '__main__':
     main()

@@ -35,7 +35,7 @@ class IterationCounter():
 
     def record_epoch_start(self, epoch):
         self.epoch_start_time = time.time()
-        self.epoch_iter = 0
+        self.epoch_iter = 0 
         self.last_iter_time = time.time()
         self.current_epoch = epoch
 
@@ -49,12 +49,20 @@ class IterationCounter():
         self.total_steps_so_far += self.opt.batchSize
         self.epoch_iter += self.opt.batchSize
 
+    def record_time(self):
+        current_time = time.time()
+
+        # the last remaining batch is dropped (see data/__init__.py),
+        # so we can assume batch size is always opt.batchSize
+        self.time_now = (current_time - self.last_iter_time) / self.opt.batchSize
+
+
     def record_epoch_end(self):
         current_time = time.time()
         self.time_per_epoch = current_time - self.epoch_start_time
         print('End of epoch %d / %d \t Time Taken: %d sec' %
               (self.current_epoch, self.total_epochs, self.time_per_epoch))
-        if self.current_epoch % self.opt.save_epoch_freq == 0 and dist.get_rank() == 0:
+        if self.current_epoch % self.opt.save_epoch_freq == 0 :#新增DDP：：：and dist.get_rank() == 0
             np.savetxt(self.iter_record_path, (self.current_epoch + 1, 0),
                        delimiter=',', fmt='%d')
             print('Saved current iteration count at %s.' % self.iter_record_path)

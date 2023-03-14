@@ -55,12 +55,36 @@ def main():
             # Training
             # train generator
             if i % opt.D_steps_per_G == 0:
-                trainer.run_interventor_one_step(data_i)
-
+                # if i % opt.effect_steps_per_G != 0:
+                #     trainer.run_generator_one_step_noeffect(data_i)
+                # else:
+                    # trainer.run_generator_one_step(data_i)
+                # trainer.run_generator_one_step_noeffect(data_i)
+                if opt.vae:
+                    trainer.run_generator_one_step(data_i)
+                elif 'onlyeord' in opt.name:
+                    trainer.run_generator_one_step_onlyeord(data_i)
+                elif 'noeffect' in opt.name:
+                    trainer.run_generator_one_step_noeffect(data_i)
+                else:
+                    trainer.run_generator_one_step_online(data_i)
+                # trainer.run_generator_one_step(data_i)
+                # if dist.get_rank() == 0:
+                #     iter_counter.record_time()
+                #     print('generator time:', iter_counter.time_now)
             # train discriminator
-            trainer.run_discriminator_one_step(data_i)
-            
-            # Visualizations
+            if opt.vae:
+                trainer.run_discriminator_one_step(data_i)
+            elif 'onlyeord' in opt.name:
+                trainer.run_discriminator_one_step_onlyeord(data_i)
+            elif 'noeffect' in opt.name:
+                trainer.run_discriminator_one_step_noeffect(data_i)
+            else:
+                trainer.run_discriminator_one_step_online(data_i)
+            # if dist.get_rank() == 0:
+            #     iter_counter.record_time()
+            #     print('discriminator time:', iter_counter.time_now)
+            # Visualizations    
             if iter_counter.needs_printing():
                 losses = trainer.get_latest_losses()
                 if dist.get_rank() == 0:
@@ -69,12 +93,16 @@ def main():
                     visualizer.plot_current_errors(losses, iter_counter.total_steps_so_far)
 
             if iter_counter.needs_displaying():
-                
+                if opt.vae:
+                    index1, index2, index3 = 1, 2, 3
+                else:
+                    index1, index2, index3 = 3, 6, 7
                 visuals = OrderedDict([('input_label', trainer.get_semantics().max(dim=1)[1].cpu().unsqueeze(1)),
-                                    # ('synthesized_image', trainer.get_latest_generated()),
-                                    # ('real_image', data_i['image']),
-                                    ('eord_base', trainer.get_intervention()[3]),('eord_pos', trainer.get_intervention()[4]),('eord_neg', trainer.get_intervention()[5]),
-                                    ('intervention_pos', trainer.get_intervention()[6]),('intervention_neg', trainer.get_intervention()[7]),
+                                    ('synthesized_image', trainer.get_latest_generated()),
+                                    ('real_image', data_i['image']),
+                                    ('eord_base', trainer.get_intervention()[index1]), #model: 1  online: 3
+                                    ('eord_pos', trainer.get_intervention()[index2]),('eord_neg', trainer.get_intervention()[index3]),   #model: 2 3  online: 6 7
+                                    # ('intervention_pos', trainer.get_intervention()[2]),('intervention_neg', trainer.get_intervention()[3]),
                                     ('masked', trainer.get_mask())])
     
                 if not opt.no_instance:
@@ -139,10 +167,11 @@ def main():
 
         if epoch % opt.save_epoch_freq == 0 or \
         epoch == iter_counter.total_epochs:
-            print('saving the model at the end of epoch %d, iters %d' %
-                (epoch, iter_counter.total_steps_so_far))
-            trainer.save('latest')
-            trainer.save(epoch)
+            if dist.get_rank() == 0:
+                print('saving the model at the end of epoch %d, iters %d' %
+                    (epoch, iter_counter.total_steps_so_far))
+                trainer.save('latest')
+                trainer.save(epoch)
 
     print('Training was successfully finished.')
 

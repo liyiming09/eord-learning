@@ -125,8 +125,8 @@ class Visualizer():
         message = '(epoch: %d, iters: %d, time: %.3f) ' % (epoch, i, t)
         for k, v in errors.items():
             #print(v)
-            #if v != 0:
-            v = v.mean().float()
+            if v != 0:
+                v = v.mean().float()
             message += '%s: %.3f ' % (k, v)
             log_value(str(k), v, self.total_datanum*(epoch-1)+i)
 
@@ -143,15 +143,21 @@ class Visualizer():
             elif 'intervention_base' == key:
                 #t = util.tensor2label(t, self.opt.label_nc + 2, tile=tile)
                 t = util.tensor2label(t, 255, tile=tile)
-            elif 'intervention_pos' == key or 'intervention_neg' == key or 'eord' in key:
+            elif 'intervention_pos' == key or 'mask_base' == key or 'intervention_neg' == key or 'eord' in key:
                 t = (np.transpose(t[0].detach().cpu().float().numpy(), (1, 2, 0))    * 255).astype(np.uint8)
-            elif 'attention_map' == key:
+            elif 'attention' in key:
                 maps = []
                 for att in t:
                     tmp = att[0].cpu().squeeze().float().numpy()
-                    tmp = (tmp*255).astype(np.uint8).astype(np.uint8)
+                    tmp = (tmp*255).astype(np.uint8)
                     maps.append(tmp)
                 t = maps
+            elif 'intpret' in key:
+
+                tmp = t.squeeze()
+                tmp = (tmp*255).astype(np.uint8)
+
+                t = tmp
             elif 'real_label' == key:
                 t = np.transpose(t.cpu().float().numpy(), (1, 2, 0)).astype(np.uint8)
             else:
@@ -173,7 +179,7 @@ class Visualizer():
         links = []
 
         for label, image_numpy in visuals.items():
-            if label == 'attention_map':
+            if  'attention' in label:
                 for i in range(len(image_numpy)):
                     new_name = name + '_' + str(i)
                     image_name = os.path.join(label, '%s.png' % (new_name))

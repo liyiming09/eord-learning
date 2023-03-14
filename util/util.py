@@ -148,8 +148,8 @@ def mkdirs(paths):
 
 def mkdir(path):
     if not os.path.exists(path):
-        if dist.get_rank() == 0:
-            os.makedirs(path)
+        # if dist.get_rank() == 0:
+        os.makedirs(path)
 
 
 def atoi(text):
@@ -203,8 +203,8 @@ def find_class_in_module(target_cls_name, module):
 def save_network(net, label, epoch, opt):
     save_filename = '%s_net_%s.pth' % (epoch, label)
     save_path = os.path.join(opt.checkpoints_dir, opt.name, save_filename)
-    if dist.get_rank() == 0:
-        torch.save(net.state_dict(), save_path)
+    # if dist.get_rank() == 0:
+    torch.save(net.state_dict(), save_path)
         # print(0)
     if len(opt.gpu_ids) and torch.cuda.is_available():
         net.cuda()

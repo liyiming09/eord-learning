@@ -65,19 +65,11 @@ class RefineGTrainer():
         # print(self.pix2pix_model_on_one_gpu.netD)
 
     def run_generator_one_step(self, data):
-        # self.optimizer_E.zero_grad()
         self.optimizer_G.zero_grad()
-        # self.optimizer_ED.zero_grad()
-        self.optimizer_D.zero_grad()
-        with torch.autograd.set_detect_anomaly(True):
-            g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='generator')
-        # print(123456)
-            g_loss = sum(g_losses.values()).mean()
-        
+        g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='generator')
+        g_loss = sum(g_losses.values()).mean()
+        g_loss.backward()
 
-            g_loss.backward()
-        # self.optimizer_E.step()
-        # self.optimizer_E.zero_grad()
         self.optimizer_G.step()
         self.optimizer_G.zero_grad()
         self.g_losses = g_losses
@@ -85,12 +77,47 @@ class RefineGTrainer():
         self.masked = masked
         self.semantics = semantics
 
-    # def run_discriminator_one_step(self, data):
-    #     self.optimizer_D.zero_grad()
-    #     d_losses = self.pix2pix_model(data, mode='discriminator')
-    #     d_loss = sum(d_losses.values()).mean()
-    #     d_loss.backward()
+    def run_generator_one_step_online(self, data):
+        self.optimizer_G.zero_grad()
+        g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='generator_online')
+        g_loss = sum(g_losses.values()).mean()
+        g_loss.backward()
 
+        self.optimizer_G.step()
+        self.optimizer_G.zero_grad()
+        self.g_losses = g_losses
+        self.generated = generated
+        self.masked = masked
+        self.semantics = semantics
+
+
+    def run_generator_one_step_onlyeord(self, data):
+        self.optimizer_G.zero_grad()
+        g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='generator_onlineonlyeord')
+        g_loss = sum(g_losses.values()).mean()
+        g_loss.backward()
+
+        self.optimizer_G.step()
+        self.optimizer_G.zero_grad()
+        self.g_losses = g_losses
+        self.generated = generated
+        self.masked = masked
+        self.semantics = semantics
+
+
+    def run_generator_one_step_noeffect(self, data):
+        self.optimizer_G.zero_grad()
+        g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='generator_noeord')
+        g_loss = sum(g_losses.values()).mean()
+    
+
+        g_loss.backward()
+        self.optimizer_G.step()
+        self.optimizer_G.zero_grad()
+        self.g_losses = g_losses
+        self.generated = generated
+        self.masked = masked
+        self.semantics = semantics
     def run_discriminator_one_step(self, data):
         # self.optimizer_E.zero_grad()
         # self.optimizer_ED.zero_grad()
@@ -105,6 +132,48 @@ class RefineGTrainer():
         self.optimizer_D.zero_grad()
         self.d_losses = d_losses
 
+    def run_discriminator_one_step_online(self, data):
+        # self.optimizer_E.zero_grad()
+        # self.optimizer_ED.zero_grad()
+        self.optimizer_D.zero_grad()
+        d_losses = self.pix2pix_model(data, mode='discriminator_online')
+        # print(654321)
+        d_loss = sum(d_losses.values()).mean()
+        d_loss.backward()
+        # self.optimizer_ED.step()
+        self.optimizer_D.step()
+        # self.optimizer_ED.zero_grad()
+        self.optimizer_D.zero_grad()
+        self.d_losses = d_losses
+
+    def run_discriminator_one_step_onlyeord(self, data):
+        # self.optimizer_E.zero_grad()
+        # self.optimizer_ED.zero_grad()
+        self.optimizer_D.zero_grad()
+        d_losses = self.pix2pix_model(data, mode='discriminator_onlineonlyeord')
+        # print(654321)
+        d_loss = sum(d_losses.values()).mean()
+        d_loss.backward()
+        # self.optimizer_ED.step()
+        self.optimizer_D.step()
+        # self.optimizer_ED.zero_grad()
+        self.optimizer_D.zero_grad()
+        self.d_losses = d_losses
+
+    def run_discriminator_one_step_noeffect(self, data):
+        # self.optimizer_E.zero_grad()
+        # self.optimizer_ED.zero_grad()
+        self.optimizer_D.zero_grad()
+        d_losses = self.pix2pix_model(data, mode='discriminator_noeord')
+        # print(654321)
+        d_loss = sum(d_losses.values()).mean()
+        d_loss.backward()
+        # self.optimizer_ED.step()
+        self.optimizer_D.step()
+        # self.optimizer_ED.zero_grad()
+        self.optimizer_D.zero_grad()
+        self.d_losses = d_losses
+        
     def run_interventor_one_step(self, data):
         self.optimizer_E.zero_grad()
         with torch.autograd.set_detect_anomaly(True):
@@ -173,11 +242,11 @@ class RefineGTrainer():
 
             for param_group in self.optimizer_D.param_groups:
                 param_group['lr'] = new_lr_D
-            for param_group in self.optimizer_E.param_groups:
-                param_group['lr'] = new_lr_G
-            for param_group in self.optimizer_ED.param_groups:
-                param_group['lr'] = new_lr_D
+            # for param_group in self.optimizer_E.param_groups:
+            #     param_group['lr'] = new_lr_G
+            # for param_group in self.optimizer_ED.param_groups:
+            #     param_group['lr'] = new_lr_D
             for param_group in self.optimizer_G.param_groups:
-                param_group['lr'] = new_lr_G/100
+                param_group['lr'] = new_lr_G
             print('update learning rate: %f -> %f' % (self.old_lr, new_lr))
             self.old_lr = new_lr

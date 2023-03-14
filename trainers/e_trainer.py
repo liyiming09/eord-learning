@@ -6,7 +6,6 @@ Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses
 from models.networks.sync_batchnorm import DataParallelWithCallback
 from models.pix2pix_model import Pix2PixModel
 from models.attentioneffect_model import AttentionEffectModel
-from models.learneord_model import LearnEordModel
 from models.onlye_model import OnlyEModel
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -80,13 +79,13 @@ class ETrainer():
 
     def run_interventor_one_step(self, data):
         self.optimizer_E.zero_grad()
-        with torch.autograd.set_detect_anomaly(True):
-            g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='interventor')
-        # print(123456)
-            g_loss = sum(g_losses.values()).mean()
-        
 
-            g_loss.backward()
+        g_losses, generated, masked, semantics = self.pix2pix_model(data, mode='interventor')
+    # print(123456)
+        g_loss = sum(g_losses.values()).mean()
+    
+
+        g_loss.backward()
         self.optimizer_E.step()
         # self.optimizer_E.zero_grad()
         self.g_losses = g_losses

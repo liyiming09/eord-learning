@@ -21,13 +21,15 @@ class TrainOptions(BaseOptions):
         # for training
         parser.add_argument('--continue_train', action='store_true', help='continue training: load the latest model')
         parser.add_argument('--which_epoch', type=str, default='latest', help='which epoch to load? set to latest to use latest cached model')
-        parser.add_argument('--niter', type=int, default=0, help='# of iter at starting learning rate. This is NOT the total #epochs. Totla #epochs is niter + niter_decay')
-        parser.add_argument('--niter_decay', type=int, default=50, help='# of iter to linearly decay learning rate to zero')
+        parser.add_argument('--niter', type=int, default=40, help='# of iter at starting learning rate. This is NOT the total #epochs. Totla #epochs is niter + niter_decay')
+        parser.add_argument('--niter_decay', type=int, default=60, help='# of iter to linearly decay learning rate to zero')
         parser.add_argument('--optimizer', type=str, default='adam')
         parser.add_argument('--beta1', type=float, default=0.5, help='momentum term of adam')
         parser.add_argument('--beta2', type=float, default=0.999, help='momentum term of adam')
         parser.add_argument('--lr', type=float, default=0.0002, help='initial learning rate for adam')
         parser.add_argument('--D_steps_per_G', type=int, default=1, help='number of discriminator iterations per generator iterations.')
+        parser.add_argument('--effect_steps_per_G', type=int, default=10, help='number of discriminator iterations per generator iterations.')
+
 
         # for discriminators
         parser.add_argument('--ndf', type=int, default=64, help='# of discrim filters in first conv layer')
@@ -39,6 +41,7 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--lambda_divco', type=float, default=0, help='weight for divco loss')
         parser.add_argument('--lambda_ms', type=float, default=0, help='weight for modeseek loss')
         parser.add_argument('--lambda_monce', type=float, default=10, help='weight for monce loss')
+        parser.add_argument('--lambda_masknce', type=float, default=1, help='weight for monce loss')
         parser.add_argument('--lambda_recons', type=float, default=100, help='weight for L1 reconstruction loss')
         parser.add_argument('--no_ganFeat_loss', action='store_true', help='if specified, do *not* use discriminator feature matching loss')
         parser.add_argument('--no_vgg_loss', action='store_true', help='if specified, do *not* use VGG feature matching loss')
@@ -47,16 +50,33 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--gan_mode', type=str, default='hinge', help='(ls|original|hinge)')
         parser.add_argument('--netD', type=str, default='sesamemultiscale', help='(n_layers|multiscale|image)')
         parser.add_argument('--netF', type=str, default='Patch', help='(n_layers|multiscale|image)')
+        parser.add_argument('--negtype', type=str, default='frompos', help='(frombg|frompos|other)')
         parser.add_argument('--cost_type', type=str, default='hard', help='(hard or easy)')
         parser.add_argument('--no_TTUR', action='store_true', help='Use TTUR training scheme')
         parser.add_argument('--lambda_kld', type=float, default=0.05)
 
 
         parser.add_argument('--tau', type=float, default=1, help='temprature')
-        parser.add_argument('--num_negative', type=int, default=2, help='# of NEGATIVE SAMPLES during the aug')
+        parser.add_argument('--num_negative', type=int, default=1, help='# of NEGATIVE SAMPLES during the aug')
         parser.add_argument('--featnorm', action='store_true', help='whether featnorm')
         parser.add_argument('--ot_weight', type=float, default=256.0, help='weight for vgg loss')
+
+
+        parser.add_argument('--part_nce', action='store_true', help='if specified, do use part masknce loss')
        
+        parser.add_argument('--use_queue', action='store_true', help='if specified, do use masknce_queue loss')
+        parser.add_argument('--queue_dim', type=int, default=128, help='# dim of the vectors in the queue.')
+        parser.add_argument('--queue_num', type=int, default=128, help='# num of the vectors in the queue.')
+        parser.add_argument('--rand_pos_que', action='store_true', help='if specified, do use masknce_queue loss, while pos_proto is cal constrative loss with a random other cls')
+        parser.add_argument('--no_ot', action='store_true', help='if specified, do use sinkhron_OT in masknce_queue loss')
+        parser.add_argument('--no_negk', action='store_true', help='if specified, do use negk in masknce pos loss')
+        parser.add_argument('--no_select', action='store_true', help='if specified, do use negk in masknce pos loss')
+        parser.add_argument('--no_weight', action='store_true', help='if specified, do use negk in masknce pos loss')
+        parser.add_argument('--diffaug', action='store_true', help='if specified, do use diffaug for D')
+
+        
+
+        
         
         self.isTrain = True
         return parser

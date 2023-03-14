@@ -29,7 +29,6 @@ def main():
 
      # create trainer for our model
     trainer = ETrainer(opt)
-
     # load the dataloader
     dataloader = data.create_dataloader(opt, dataset)
 

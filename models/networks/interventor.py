@@ -263,6 +263,7 @@ class vaeInterventor(BaseNetwork):
         label_nc = opt.label_nc
         self.fakeatt = False
         input_nc = label_nc + (1 if opt.contain_dontcare_label else 0) + (0 if opt.no_instance else 1)+ (0 if opt.no_inpaint else 1)
+        print("vae input_nc:",input_nc)
         # if opt.mix_input_gen:
         #     input_nc += 4
         output_nc = 2
